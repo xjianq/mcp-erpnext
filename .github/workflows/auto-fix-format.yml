@@ -1,0 +1,26 @@
+name: Auto Fix Deno Format
+on:
+  workflow_dispatch: # 手动点按钮运行
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: 安装Deno
+        uses: denoland/setup-deno@v2
+
+      - name: 自动格式化yml文件
+        run: deno fmt .github/workflows/sync-upstream.yml
+
+      - name: 提交格式化后的文件
+        run: |
+          git config user.name "Action Bot"
+          git config user.email "bot@github.com"
+          git add .github/workflows/sync-upstream.yml
+          git commit -m "自动修复deno格式问题"
+          git push
