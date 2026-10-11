@@ -4,13 +4,15 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # 关键：先检出当前仓库代码，解决 not in a git directory 报错
       - name: Checkout current repo code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -20,5 +22,5 @@ jobs:
           source_repo: "punkpeye/awesome-mcp-servers"
           source_branch: "main"
           destination_branch: "main"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.PAT }}
           sync_tags: true
