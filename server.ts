@@ -34,8 +34,16 @@
 import { launchInspector, MCP_APP_MIME_TYPE, McpApp } from "@casys/mcp-server";
 import { ErpNextToolsClient } from "./src/client.ts";
 import { FrappeAPIError } from "./src/api/frappe-client.ts";
-import { UI_VIEWERS } from "./src/ui/viewers.ts";
-import { resolveViewerDistPath } from "./src/ui/viewer-resource-paths.ts";
+import { UI_VIEWERS, withViewerResourceMeta } from "./src/ui/viewers.ts";
+import {
+  BUY_VIEW_APP_MANIFEST,
+  BUY_VIEW_APP_MANIFEST_JSON,
+} from "./src/buy/manifest.ts";
+import { BUY_VIEW_APP_MANIFEST_URI } from "./src/buy/identities.ts";
+import {
+  readViewerDist,
+  resolveViewerDistPath,
+} from "./src/ui/viewer-resource-paths.ts";
 import {
   exit,
   getArgs,
@@ -46,8 +54,34 @@ import {
 import { buildAuthProvider, loadAuthConfig } from "./src/auth/config.ts";
 import { warmCache } from "./src/cache/warm.ts";
 import { resourceMetadataRoute } from "./src/auth/resource-metadata-route.ts";
+import { loadMrtrConfig } from "./src/mrtr/config.ts";
 
 const DEFAULT_HTTP_PORT = 3012;
+
+function registerBuyViewAppManifest(server: McpApp): void {
+  const bytes = new TextEncoder().encode(BUY_VIEW_APP_MANIFEST_JSON);
+  server.registerResource(
+    {
+      uri: BUY_VIEW_APP_MANIFEST_URI,
+      name: "ERPNext Buy Evidence App manifest",
+      description:
+        `Exact ${BUY_VIEW_APP_MANIFEST.app.id}@${BUY_VIEW_APP_MANIFEST.app.version} ` +
+        "whole-view and recorded-session contract.",
+      mimeType: "application/json",
+      size: bytes.byteLength,
+    },
+    (requested) => {
+      if (requested.toString() !== BUY_VIEW_APP_MANIFEST_URI) {
+        throw new Error("Requested URI does not match the Buy App manifest.");
+      }
+      return {
+        uri: BUY_VIEW_APP_MANIFEST_URI,
+        mimeType: "application/json",
+        text: BUY_VIEW_APP_MANIFEST_JSON,
+      };
+    },
+  );
+}
 
 async function main() {
   const args = getArgs();
@@ -88,16 +122,26 @@ async function main() {
   const authMetadataRoute = authProvider
     ? resourceMetadataRoute(authProvider)
     : undefined;
+  const mrtrConfig = loadMrtrConfig();
 
   // Initialize tools client
   const toolsClient = new ErpNextToolsClient(
-    categories ? { categories } : undefined,
+    {
+      ...(categories ? { categories } : {}),
+      enableLinkDisambiguation: mrtrConfig !== undefined,
+    },
   );
 
   // Build MCP server
   const server = new McpApp({
     name: "mcp-erpnext",
-    version: "2.6.0",
+    version: "3.1.0-beta.11",
+    transport: "stateless",
+    cache: {
+      ttlMs: 3_600_000,
+      scope: "public",
+    },
+    mrtr: mrtrConfig,
     maxConcurrent: 10,
     backpressureStrategy: "queue",
     validateSchema: true,
@@ -114,6 +158,8 @@ async function main() {
   const mcpTools = toolsClient.toMCPFormat();
   const handlers = toolsClient.buildHandlersMap();
   server.registerTools(mcpTools, handlers);
+
+  registerBuyViewAppManifest(server);
 
   // Register UI resources (MCP Apps viewers)
   // Built by: cd lib/erpnext/src/ui && node build-all.mjs
@@ -132,15 +178,19 @@ async function main() {
 
     if (distPath) {
       server.registerResource(
-        {
+        withViewerResourceMeta({
           uri: resourceUri,
           name: `ERPNext ${humanName}`,
           description: `ERPNext UI: ${viewerName}`,
           mimeType: MCP_APP_MIME_TYPE,
-        },
+        }),
         async () => {
-          const html = await readTextFile(distPath);
-          return { uri: resourceUri, mimeType: MCP_APP_MIME_TYPE, text: html };
+          const html = await readViewerDist(distPath, readTextFile);
+          return withViewerResourceMeta({
+            uri: resourceUri,
+            mimeType: MCP_APP_MIME_TYPE,
+            text: html,
+          });
         },
       );
       console.error(`[mcp-erpnext] Registered UI resource: ${resourceUri}`);

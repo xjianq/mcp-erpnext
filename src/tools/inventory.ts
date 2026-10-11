@@ -8,7 +8,7 @@
 
 import type { FrappeFilter } from "../api/types.ts";
 import type { ErpNextTool } from "./types.ts";
-import { DOCLIST_META, STOCK_META } from "./viewer-meta.ts";
+import { DOC_META, DOCLIST_META, STOCK_META } from "./viewer-meta.ts";
 import { resolveItem } from "../api/resolve.ts";
 
 export const inventoryTools: ErpNextTool[] = [
@@ -81,6 +81,7 @@ export const inventoryTools: ErpNextTool[] = [
   {
     name: "erpnext_item_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single ERPNext Item by name/item_code. Returns all fields including pricing and stock details.",
     category: "inventory",
@@ -96,7 +97,7 @@ export const inventoryTools: ErpNextTool[] = [
         throw new Error("[erpnext_item_get] 'name' is required");
       }
       const doc = await ctx.client.get("Item", input.name as string);
-      return { data: doc };
+      return { data: { ...doc, doctype: "Item" } };
     },
   },
 
@@ -117,7 +118,8 @@ export const inventoryTools: ErpNextTool[] = [
         },
         uom: {
           type: "string",
-          description: "Unit of measure (default: 'Nos')",
+          description:
+            "Stock unit of measure, sent to ERPNext as stock_uom (for example 'Nos')",
         },
         is_stock_item: {
           type: "boolean",
@@ -141,7 +143,7 @@ export const inventoryTools: ErpNextTool[] = [
         item_name: input.item_name as string,
       };
       if (input.item_group) data.item_group = input.item_group as string;
-      if (input.uom) data.uom = input.uom as string;
+      if (input.uom) data.stock_uom = input.uom as string;
       if (input.is_stock_item !== undefined) {
         data.is_stock_item = input.is_stock_item;
       }
@@ -236,7 +238,9 @@ export const inventoryTools: ErpNextTool[] = [
         filters.push([
           "item_code",
           "=",
-          await resolveItem(ctx.client, input.item_code as string),
+          await resolveItem(ctx.client, input.item_code as string, {
+            inputPath: "item_code",
+          }),
         ]);
       }
       if (input.warehouse) {
@@ -322,12 +326,16 @@ export const inventoryTools: ErpNextTool[] = [
     _meta: DOCLIST_META,
     description: "List Stock Entries (material transfers, receipts, issues). " +
       "Fields: name, stock_entry_type, posting_date, from_warehouse, to_warehouse, total_amount. " +
-      "Filterable by stock_entry_type, date range.",
+      "Filterable by item_code, stock_entry_type, date range.",
     category: "inventory",
     inputSchema: {
       type: "object",
       properties: {
         limit: { type: "number", description: "Max results (default 20)" },
+        item_code: {
+          type: "string",
+          description: "Exact item code present in a Stock Entry line",
+        },
         stock_entry_type: {
           type: "string",
           description:
@@ -343,6 +351,14 @@ export const inventoryTools: ErpNextTool[] = [
     handler: async (input, ctx) => {
       const limit = (input.limit as number) ?? 20;
       const filters: FrappeFilter[] = [];
+      if (input.item_code) {
+        filters.push([
+          "Stock Entry Detail",
+          "item_code",
+          "=",
+          input.item_code as string,
+        ]);
+      }
       if (input.stock_entry_type) {
         filters.push([
           "stock_entry_type",
@@ -383,6 +399,7 @@ export const inventoryTools: ErpNextTool[] = [
   {
     name: "erpnext_stock_entry_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single Stock Entry by name. Returns full document with item details.",
     category: "inventory",
@@ -401,7 +418,7 @@ export const inventoryTools: ErpNextTool[] = [
         throw new Error("[erpnext_stock_entry_get] 'name' is required");
       }
       const doc = await ctx.client.get("Stock Entry", input.name as string);
-      return { data: doc };
+      return { data: { ...doc, doctype: "Stock Entry" } };
     },
   },
 

@@ -2,6 +2,453 @@
 
 All notable changes to `@casys/mcp-erpnext` will be documented in this file.
 
+## [Unreleased]
+
+## [3.1.0-beta.11] - 2026-09-19
+
+### Added
+
+- Viewers support Traditional Chinese, Hindi, Bengali, Tamil and Urdu from the
+  host locale, including right-to-left document direction for Urdu.
+
+- Generic document lists support bounded offset pagination and an explicit
+  fresh-read option for viewer revalidation.
+
+- Buy recorded-result `/2.0` retains bounded quantity, unit, and reason metadata
+  for selected unpriced lines. The immutable Buy evidence viewer shows those
+  excluded lines without assigning a monetary value or refreshing ERP.
+
+- Offline `buy:plan-demo` prepares inspectable Item and public-catalogue Item
+  Price creation calls from a closed, explicitly marked demo catalogue. It
+  retains source observations and leaves unknown prices unpriced. The command
+  selects no site and applies no changes.
+
+### Fixed
+
+- Refreshing a Kanban board rechecks related Timesheet presence while preserving
+  open Task edits. Additional multiline detail fields retain their line breaks
+  in editing and read-only views.
+- Language changes update root navigation labels and selected KPI values without
+  changing nested chart selection identities.
+
+- Kanban status, transition, badge and metric labels follow the host language.
+  Context hints describe both selection and deselection, and navigation titles
+  and save feedback update when the language changes.
+
+- Clicking selected viewer data again, or pressing Space, removes that exact
+  context selection. Opening its detail with double-click or Enter preserves the
+  previous selection, including when the element was already selected.
+- Scalar KPIs without a displayed trend omit redundant context selection while
+  retaining drill-down navigation.
+- Kanban details use a single editable title, compact colored metadata, and an
+  inline editable project. Dates and progress share a row; description and
+  additional fields sit beside time and finances on wider views. Assignees
+  remain visible in read-only details, and unsaved edits remain visible.
+- Kanban cards retain assignees, all supplied metrics, badge colors, and
+  milestone destinations on narrow and wide views. Task previews expose the
+  milestone control and reflect its saved state on the card.
+- Task details count distinct related timesheets before offering navigation,
+  with bounded fresh pagination and distinct loading, empty, oversized, and
+  failed checks.
+- Kanban list navigation explicitly opens only the selected document; hosts
+  without tool navigation offer a clearly labeled conversational request.
+- Generic document lists such as Company use their actual fields in narrow
+  layouts instead of showing financial `Party` / `Due` labels and an empty
+  amount. Inline details no longer manufacture a `Full detail` conversation
+  message when the server supplied no relationship action.
+- Restore the existing generic document presentation by removing the six
+  Project/Manufacturing dossier profiles introduced in PR #49. Digital Thread
+  integration needs do not establish a standalone ERPNext viewer requirement.
+- Demo Item descriptions use neutral source wording for documentary or
+  unclassified observations. Exported catalogue error codes cover unreadable CLI
+  inputs; URL validation explicitly checks syntax, not public access.
+
+## [3.1.0-beta.10] - 2026-09-13
+
+### Fixed
+
+- Recorded Buy results reject `sourceCaptures` whose URI is not the public
+  capture digest address matching the fingerprint.
+- The Buy evidence App rejects raw tool results. Only a validated recorded
+  session (`viewer.session.apply`) can display evidence.
+- Buy result fields resolve through the shared EN/FR/ZH locale catalogs and
+  update when the host locale changes. App-level waiting/rejection screens
+  retain English labels pending shared MCP View status-context support.
+
+### Added
+
+- `docs/tools.md` documents `erpnext_buy_capture`: closed DocTypes, two-read
+  agreement, and read-only/non-purchasing semantics.
+
+## [3.1.0-beta.9] - 2026-09-12
+
+### Added
+
+- Read-only `erpnext_buy_capture` records a bounded, closed set of commercial
+  documents (Item, BOM, Item Price, Supplier Quotation, Supplier, Price List,
+  UOM, Currency Exchange). Two cache-bypassing reads must agree on `modified`
+  and the closed projection fingerprint. The tool returns ephemeral canonical
+  JSON, SHA-256, and byte count. It does not store CAS, purchase, create a
+  BOM/RFQ/PO, or compute a commercial total.
+- Immutable Buy evidence viewer (`ui://mcp-erpnext/buy-evidence-viewer`) and
+  View App `io.casys.mcp-erpnext.buy-evidence@3.1.0-beta.9`, with the whole-view
+  manifest at `ui://mcp-erpnext/buy-evidence-manifest`. The App applies a
+  recorded session only (`viewer.session.apply`). Complete, partial, unresolved,
+  and unavailable projections stay labelled. There is no live DocViewer refresh,
+  mutation, or `app.callServerTool`. This is presentation of sealed evidence,
+  not a live ERP qualification.
+
+## [3.1.0-beta.8] - 2026-09-12
+
+### Fixed
+
+- Chart point rendering and context refresh share a single point index, avoiding
+  repeated work when checking selections on large charts.
+- A chart series named `all` keeps its own context identity, so refreshing it
+  preserves both its selection and the complete multi-series point selection.
+
+## [3.1.0-beta.7] - 2026-09-12
+
+### Added
+
+- KPI mini-charts expose their explicit month labels and allow each month to be
+  added to active context. Selecting the whole trend shares the complete aligned
+  series, including its period and unit, with resource and bounded text hosts.
+- Simplified Chinese translations across all eight UI viewers, contributed by
+  [@lioooooh](https://github.com/lioooooh). Chinese locale tags, including
+  Traditional Chinese variants, currently use the Simplified Chinese catalog.
+
+### Fixed
+
+- Local viewer details open immediately on double-click, independently of slow
+  context acknowledgements. Context updates show their pending state, preserve
+  confirmed selections across navigation, and keep failures visible.
+  Conversation fallbacks wait for the current context to be confirmed.
+- Hiding a chart series preserves explicitly selected points; whole-chart
+  context follows only the visible series. Refreshes update hidden selections
+  and remove obsolete KPI series when their date labels are no longer available.
+- The invoice context menu stays inside both desktop and mobile viewer frames.
+- Double-clicking an element without a detail action preserves its context
+  selection without sending duplicate updates. Large-chart refreshes reuse their
+  point index instead of rebuilding it for each selected point.
+- Revenue analytics bucket invoice dates by calendar month and return aligned
+  month labels with KPI sparklines.
+- Purchase Invoices show their effective total and a small information icon
+  explaining applied rounding, with draft configuration guidance available on
+  hover, keyboard focus, or click. The explanation supports French and English
+  across desktop and mobile layouts. Opening it does not modify the invoice.
+- Recognized Purchase Invoice missing payable-account and Stock Received But Not
+  Billed errors include guidance to the corresponding ERPNext settings while
+  preserving the original error details and existing tool inputs.
+
+### Changed
+
+- Chart legends can hide and show series while keeping at least one visible. KPI
+  and chart consultation use double-click or Enter without a persistent
+  drill-down button.
+- The viewer layout decision (`useViewerLayout`) now comes from
+  `@casys/mcp-view-components/layout` 0.7.1, which carries the same first-paint
+  guarantees as [#29](https://github.com/Casys-AI/mcp-erpnext/pull/29). One edge
+  case differs: a host declaring a non-positive container width (`0`, negative,
+  `NaN`) no longer forces the narrow layout and falls through to the measured
+  width. Every other input resolves to the same layout as before.
+
+## [3.1.0-beta.6] - 2026-09-01
+
+### Changed
+
+- **Installing the 3.1 beta follows a channel, not a pinned build.** npm/Node
+  uses `@casys/mcp-erpnext@next`; Deno uses
+  `jsr:@casys/mcp-erpnext@^3.1.0-beta`. JSR has no dist-tags, hence the range
+  there. Exact versions remain in this changelog.
+- The generic document viewer now declares its own application version
+  (`1.0.0`), like the other seven MCP Apps, instead of echoing the package
+  prerelease.
+
+### Fixed
+
+- Opening a document-list detail near the bottom of the frame now brings the
+  panel into view. The viewer scrolls only its internal container, never the
+  host iframe, waits for the loaded document rather than the loading skeleton,
+  and drops the smooth behaviour when the user prefers reduced motion.
+- Layout density is decided before the first paint from both container width and
+  pointer type, so a narrow touch iframe no longer paints the stacked panel
+  layout before settling on mobile.
+- A detail whose row leaves the current page, or disappears from the data, now
+  closes instead of leaving an unmounted panel with stale content.
+
+## [3.1.0-beta.5] - 2026-08-30
+
+### Added
+
+- **Multi-selection active context across MCP Apps.** Charts, KPIs, funnels,
+  document lists, documents, invoice lines, stock rows, attachments, and nested
+  levels can contribute up to eight compact business references while keeping
+  one bounded local resource available to the host.
+- **Allowlisted Frappe method calls.** This beta includes the
+  `erpnext_method_call` escape hatch introduced in stable 3.0.3, with exact,
+  prefix, or explicit global allowlists and optional cache invalidation after a
+  mutating call.
+
+### Changed
+
+- Interactive data now follows one input grammar: click or Space toggles active
+  context; double-click or Enter opens detail without changing context. A
+  separate compact control keeps detail available to touch and assistive
+  technology users. Kanban card titles remain open-only because their card
+  surface owns drag gestures.
+- Document-list details remain full-width below the selected row. Item, stock,
+  supplier, customer, and related-document actions now continue through the
+  existing breadcrumb navigation instead of creating disclosures inside
+  disclosures.
+- KPI and funnel details are explicit breadcrumb actions, while chart and stock
+  surfaces retain inline progressive disclosure where the root visualization
+  stays visible.
+- Viewer tables and detail surfaces now honour the host-provided frame height
+  instead of relying on fixed internal heights.
+
+### Fixed
+
+- Active-context selections survive canonical refreshes, repeated visible
+  labels, and navigation between homonymous nested levels without retaining
+  deleted rows or stale values.
+- Chart detail helpers choose their side from the available width and remain
+  compact in narrow viewers. Detail controls expose correct disclosure or
+  navigation semantics, preserve headings, and meet coarse-pointer target sizes.
+
+## [3.0.3] - 2026-08-30
+
+### Added
+
+- **Allowlisted Frappe method calls.** `erpnext_method_call` provides a
+  deny-by-default escape hatch for custom-app `@frappe.whitelist` methods,
+  business methods that cannot be represented as direct document updates, and
+  GET-only endpoints. Deployments opt in with exact method paths, `prefix.*`, or
+  an explicit global `*` through `ERPNEXT_METHOD_ALLOWLIST`; successful mutating
+  calls can also invalidate a named document in the read cache. This resolves
+  [#21](https://github.com/Casys-AI/mcp-erpnext/issues/21). Many thanks to
+  [@notnotkeshav](https://github.com/notnotkeshav) for answering our help-wanted
+  request and implementing the feature in
+  [#27](https://github.com/Casys-AI/mcp-erpnext/pull/27).
+
+This is an intentionally focused stable maintenance release. The separate 3.1
+viewer and attachment work remains on the prerelease channel.
+
+## [3.1.0-beta.4] - 2026-08-27
+
+### Added
+
+- **Inline attachment previews in document and invoice viewers.** PDF, common
+  image, text, CSV, Markdown, and JSON files open from the filename without a
+  separate large action. Multipage PDFs use the host browser's native page and
+  thumbnail navigation; unsupported or oversized formats remain download-only.
+- **Optional document context.** Hosts advertising the MCP Apps resource
+  modality can add one bounded attachment, plus an optional note, to the active
+  context without sending a chat message.
+
+### Changed
+
+- Downloads started from an open preview reuse the already validated bytes
+  instead of fetching the attachment twice. Attachment controls now retain
+  keyboard focus, expose larger touch targets, and fail closed when the host
+  lacks the required capability.
+- Sales and generic document navigation now share the same relation registry,
+  including customer, supplier, invoice, delivery, payment, item, and stock
+  targets where the exact server tools are available.
+- Kanban task details now use a wider responsive sheet with related fields
+  grouped into compact sections instead of one long single-column form.
+- Chart exploration separates navigation from context capture: a single click
+  follows the configured drill-down, while a double-click adds the exact mark to
+  the active context.
+
+### Fixed
+
+- Document lists fit bounded MCP App frames, render their rows immediately, and
+  open record details inline below the selected row instead of in a cramped side
+  inspector.
+- Analytical charts use a stable intrinsic height, honour an explicit payload
+  height, and visibly outline the bar, point, or slice stored in context.
+- The active-context menu now uses the themed control surface and modal border,
+  avoiding the mismatched dropdown background in dark hosts.
+
+## [3.1.0-beta.3] - 2026-08-25
+
+### Fixed
+
+- **JSR installations now register and serve the same MCP Apps viewers as the
+  npm bundle.** Published JSR modules retain an HTTPS `import.meta.url`; viewer
+  resources now preserve that URL and load their packaged HTML from JSR instead
+  of treating it as a local filesystem path. This restores `doc-viewer`, Sales
+  inspectors, and nested document details for Deno installations.
+
+## [3.1.0-beta.2] - 2026-08-24
+
+### Added
+
+- **Generic `doc-viewer` for ERPNext records.** Twenty-six dedicated `*_get`
+  tools and `erpnext_doc_get` now open a responsive document surface with scalar
+  fields, long text, progress, system metadata, and ERPNext child tables. Sales
+  Order, Sales Invoice, and Quotation keep their specialized invoice viewer.
+- **Attachment workflows inside document surfaces.** Users can list and upload
+  private-by-default files, choose public visibility explicitly, and download an
+  attachment through the MCP Apps host. Uploads are single-flight and only
+  report success after the canonical File list has been read again.
+- **`erpnext_file_download`**, an app-only read tool. It re-fetches the File
+  document, verifies its exact parent and privacy, accepts only a local Frappe
+  file path, performs an authenticated no-redirect download, and returns one
+  bounded embedded resource. Tool count increases from 125 to 126; viewer count
+  increases from seven to eight.
+- **Transport-neutral document change events.** A confirmed update, submit,
+  cancel, or attachment addition carries its canonical DocType/name and marks
+  open navigation snapshots stale without discarding their UI state.
+
+### Changed
+
+- Drill-down record results retain their complete viewer envelope, including the
+  server-filtered tool manifest, navigation hints, and refresh request. Child
+  actions no longer inherit capabilities from the parent list.
+- Mutations invalidate older reads immediately, keep the affected action locked,
+  and clear a stale marker only after the corresponding surface has accepted a
+  canonical re-read. Hidden parent or child snapshots remain marked stale until
+  they are actually refreshed.
+- File downloads default to a 10 MiB decoded limit, independently configurable
+  with `ERPNEXT_MAX_DOWNLOAD_BYTES`. Uploads retain their separate
+  `ERPNEXT_MAX_UPLOAD_BYTES` limit.
+
+### Beta compatibility
+
+- No existing tool was removed and no existing input schema was made
+  incompatible. The new download tool is hidden from model tool lists and is
+  callable only by an MCP App.
+- This beta intentionally changes the presentation of generic and dedicated
+  record reads from raw JSON to `doc-viewer` in compatible hosts. Hosts without
+  MCP Apps continue to receive the normal tool result.
+- Synchronization is currently local to one viewer navigation stack. The event
+  contract can later be transported by a composition host, but beta 2 does not
+  claim automatic synchronization across separate viewers, conversations, or
+  external ERPNext edits.
+
+## [3.1.0-beta.1] - 2026-08-24
+
+### Added
+
+- **In-view navigation across all seven MCP Apps.** Compatible hosts open typed
+  list, record, and chart targets inside the current viewer, with back and
+  breadcrumb navigation that preserves each level's state. Text messaging
+  remains available as a host-gated conversational fallback.
+- **Active context for charts, KPIs, and funnels.** Compatible hosts receive a
+  bounded snapshot through `updateModelContext`. A compact context chip keeps up
+  to eight selections, supports individual removal and clear-all, survives
+  nested navigation, and resets for a genuinely new viewer root.
+- **`erpnext_file_list`** lists a document's attachments with their URL, size,
+  privacy, and metadata. Tool count increases from 124 to 125.
+
+### Changed
+
+- Rebuilt all seven viewers with Preact and Tailwind, including responsive wide,
+  panel, and mobile layouts, host-aware theme and locale, and complete English
+  and French UI catalogs.
+- Submit, cancel, and discarding unsaved Kanban edits now use explicit compact
+  confirmation sheets.
+- Analytical navigation preserves the originating period, filters, clicked
+  point, and clicked series. Nested charts retain their chart type, stack, axes,
+  currency, unit, and negative-value semantics.
+
+### Fixed
+
+- Viewer actions are gated by host capabilities and the exact tools loaded by
+  the server. Category-filtered deployments no longer expose unavailable actions
+  or typed navigation targets.
+- Mutations refresh through explicit read-only tools instead of risking a replay
+  of the write operation.
+- Stale or overlapping refresh, navigation, and save responses no longer
+  overwrite newer host payloads or edits. Kanban preserves changes entered
+  during slow saves and serializes updates.
+- Chart and funnel navigation now follows the displayed period and series;
+  counts retain their own unit instead of inheriting a chart currency.
+- Legacy 3.0 payloads and the published generic-filter schema remain accepted
+  while newer payloads carry explicit document and tool identities.
+
+## [3.0.2] - 2026-08-21
+
+### Fixed
+
+- **Claude Code can load all 124 tools over stdio with MCP 2026-07-28.** The
+  bundled framework now uses the official era-aware stdio server, so modern
+  `server/discover` and `tools/list` responses carry the required
+  `resultType: "complete"`. A client that begins with legacy `initialize` still
+  receives the 2025-11-25 response shape. This fixes
+  [#22](https://github.com/Casys-AI/mcp-erpnext/issues/22). Many thanks to
+  [@cschoa-dotcom](https://github.com/cschoa-dotcom) for the precise report,
+  reproduction, and protocol diagnosis.
+
+- Ambiguous-link MRTR now follows the same signed-state and single-use replay
+  policy on stdio as on HTTP, including the SDK's compatibility path for legacy
+  clients. The framework rejects malformed or replayed retries before an ERPNext
+  handler can mutate data.
+
+- The MCP server identity now reports `3.0.2`, matching the package version.
+
+## [3.0.1] - 2026-08-08
+
+### Changed
+
+- use `@casys/mcp-server` `^0.25.0`, which brings four 2026-07-28 conformance
+  fixes: `server/discover` over stdio, argument validation on JSON Schema
+  2020-12 (draft-07 silently ignored `prefixItems` and the other 2020-12
+  keywords), W3C trace-context propagation, and client credentials bound to the
+  authorization server that issued them.
+
+  None of that release's breaking changes affect this server: it does not use
+  the OAuth client, no tool schema uses the draft-07 tuple form, and no test
+  asserts on the method-not-found message.
+
+## [3.0.0] - 2026-07-31
+
+### ⚠ BREAKING CHANGES
+
+- **HTTP transport is stateless in the unreleased code.** Every HTTP request
+  must carry `MCP-Protocol-Version: 2026-07-28`, the matching `Mcp-Method`, and
+  `params._meta["io.modelcontextprotocol/protocolVersion"]` plus an
+  object-valued `clientCapabilities`. A client that omits required protocol
+  fields is rejected on every call, including `initialize`. Clients built
+  against MCP spec 2025-06-18 send no such field — notably the official
+  TypeScript SDK v1 line, whose HTTP transport never emits it. `GET /mcp`
+  returns 405; no `Mcp-Session-Id` is issued.
+
+  **stdio clients are unaffected** — the stateless mode gates only the HTTP
+  handler. If you connect via `command`/`args`, nothing changes for you.
+
+  Users who need the previous behaviour should stay on the 2.x line. See
+  [docs/migration-mcp-spec-2026-07-28.md](docs/migration-mcp-spec-2026-07-28.md).
+
+### Features
+
+- use `@casys/mcp-server` `^0.24` and the complete MCP 2026-07-28 HTTP contract:
+  `server/discover`, routing headers, complete result envelopes, and public
+  one-hour cache hints for discovery/list/read responses
+- offer opt-in signed MRTR link disambiguation where configured with
+  `MCP_MRTR_SIGNING_KEY` (exactly 64 lowercase hexadecimal characters); without
+  a key or client elicitation, the explicit ambiguity error remains
+- do not advertise Tasks: no handler is demonstrated long-running enough and
+  framework task storage is process-local; `subscriptions/listen` exists in the
+  framework, but ERPNext notifications are not emitted
+
+### Bug Fixes
+
+- **write paths:** resolve supplier and employee names on create handlers —
+  `erpnext_purchase_order_create`, `erpnext_leave_application_create` and
+  `erpnext_expense_claim_create` required an opaque Frappe ID while their
+  `_list` counterparts already accepted human-readable names, so an agent given
+  a display name could not succeed at all
+- **hr:** `erpnext_employee_get` now resolves a name, honouring the description
+  it advertises
+- **analytics:** issue independent Frappe queries concurrently in
+  `erpnext_sales_funnel`, `erpnext_gross_profit`, `erpnext_profit_loss` and
+  `erpnext_product_radar` — one round-trip instead of up to four
+- **analytics:** bound `erpnext_product_radar` input to 8 items; the fan-out is
+  one Bin query per item
+
 ## [2.6.0](https://github.com/Casys-AI/mcp-erpnext/compare/v2.5.0...v2.6.0) (2026-07-23)
 
 ### Features

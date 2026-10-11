@@ -90,8 +90,10 @@ npm install --no-fund --no-audit "${MCP_SERVER_OVERRIDE:-@casys/mcp-server@$MCP_
 node -e '
   const v = require("@casys/mcp-server/package.json").version;
   const [ma, mi, pa] = v.split(".").map(Number);
-  if (ma === 0 && (mi < 21 || (mi === 21 && pa < 1))) {
-    console.error(`[build-node] @casys/mcp-server ${v} predates the runtime-selector fix (need >=0.21.1)`);
+  if (ma === 0 && (mi < 24 || (mi === 24 && pa < 1))) {
+    console.error(`[build-node] @casys/mcp-server ${v} lacks MRTR nonce consumption (need >=0.24.1)`);
+    console.error(`[build-node] 0.24.0 verifies a requestState token but never consumes its nonce,`);
+    console.error(`[build-node] so a signed retry can be replayed into a duplicate write.`);
     process.exit(1);
   }
   console.log(`[build-node] @casys/mcp-server ${v} OK (>=0.21.1)`);
@@ -110,6 +112,7 @@ cat bin/mcp-erpnext.mjs >> "$tmp_shebang"
 mv "$tmp_shebang" bin/mcp-erpnext.mjs
 chmod +x bin/mcp-erpnext.mjs
 cp -r src/ui/dist bin/ui-dist
+cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.txt" bin/
 cp README.md bin/README.md 2>/dev/null || cp ../README.md bin/README.md 2>/dev/null || true
 
 cat > bin/package.json <<PKGJSON
@@ -122,6 +125,8 @@ cat > bin/package.json <<PKGJSON
     "mcp-erpnext": "mcp-erpnext.mjs"
   },
   "files": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.txt",
     "mcp-erpnext.mjs",
     "ui-dist/**/*",
     "README.md"

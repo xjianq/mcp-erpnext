@@ -8,10 +8,9 @@ Repository guidelines for AI coding agents working on this codebase.
 
 ## Project Overview
 
-MCP server for ERPNext/Frappe ERP — 123 tools across 14 categories with 7
-interactive UI viewers. Connects MCP-compatible AI agents to ERPNext via the
-Model Context Protocol. Published as `@casys/mcp-erpnext` on npm (Node bundle)
-and JSR (Deno).
+MCP server that lets AI agents operate an ERPNext/Frappe instance: documents,
+workflows, and interactive UI viewers. Published as `@casys/mcp-erpnext` on npm
+(Node bundle) and JSR (Deno).
 
 ## Project Structure & Module Organization
 
@@ -130,7 +129,7 @@ REST API. Key methods: `list()`, `get()`, `create()`, `update()`, `delete()`,
 status and parsed body — no silent fallbacks.
 
 **Submit handlers must GET the doc first** to pass `modified` for Frappe's
-optimistic locking (see `docs/known-issues.md`), and must pass
+optimistic locking (see `docs/erpnext-quirks.md`), and must pass
 `{ skipCache: true }` so that read isn't served from a stale cache entry. Cancel
 does not need the pre-fetch, but both submit and cancel must call
 `ctx.client.invalidate(doctype, name)` after the mutating `callMethod` succeeds
@@ -248,8 +247,9 @@ Viewers: `invoice-viewer`, `stock-viewer`, `doclist-viewer`, `chart-viewer`,
 `ui://mcp-erpnext/{viewer-name}`.
 
 Viewers use the MCP Apps SDK (`@modelcontextprotocol/ext-apps`). Interactive
-viewers use `app.callServerTool()` for mutations and `app.sendMessage()` for
-cross-viewer navigation.
+viewers use `app.callServerTool()` for mutations and typed in-view navigation,
+`app.updateModelContext()` for bounded selections, and `app.sendMessage()` as a
+capability-gated conversational fallback.
 
 All viewers carry a `refreshRequest` payload for safe revalidation (injected by
 `src/tools/ui-refresh.ts`).
@@ -489,7 +489,7 @@ running in its own compose project), join that stack's external network instead
   Submit handlers must `GET` the doc first with `{ skipCache: true }`, then pass
   the full doc to `frappe.client.submit`, then call
   `ctx.client.invalidate(doctype, name)`. Cancel doesn't need the pre-fetch but
-  must still invalidate. See `docs/known-issues.md`.
+  must still invalidate. See `docs/erpnext-quirks.md`.
 - **`_server_messages`**: Frappe error responses have 2 levels — `exc_type` and
   `_server_messages`. The client now parses both and includes `_server_messages`
   in the error message (see `src/api/frappe-client.ts`).

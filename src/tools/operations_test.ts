@@ -6,8 +6,10 @@
  * @module lib/erpnext/tests/tools/operations_test
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
+import { SchemaValidator } from "@casys/mcp-server";
 import { operationsTools } from "./operations.ts";
+import { FrappeAPIError } from "../api/frappe-client.ts";
 import type { FrappeClient } from "../api/frappe-client.ts";
 import type { ErpNextToolContext } from "./types.ts";
 
@@ -26,6 +28,13 @@ function makeMockClient(overrides: Record<string, AnyFn> = {}): FrappeClient {
     delete: async () => {},
     callMethod: async () => null,
     invalidate: () => {},
+    downloadFile: async () => ({
+      fileId: "FILE-001",
+      fileName: "report.pdf",
+      mimeType: "application/pdf",
+      bytes: new Uint8Array([1]),
+      isPrivate: true,
+    }),
     ...overrides,
   };
   return mock as unknown as FrappeClient;
@@ -219,6 +228,111 @@ Deno.test("erpnext_doc_cancel - invalidates cache after cancel", async () => {
   assertEquals(invalidatedName, "SO-001");
 });
 
+// ── erpnext_file_list ──────────────────────────────────────────────────────
+
+Deno.test("erpnext_file_list - rejects missing or blank identifiers", async () => {
+  const tool = getTool("erpnext_file_list");
+  await assertRejects(
+    () =>
+      tool.handler({ attached_to_name: "TASK-001" }, makeCtx(makeMockClient())),
+    Error,
+    "attached_to_doctype",
+  );
+  await assertRejects(
+    () =>
+      tool.handler(
+        { attached_to_doctype: "Task", attached_to_name: "   " },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "attached_to_name",
+  );
+});
+
+Deno.test("erpnext_file_list - rejects a limit out of range", async () => {
+  const tool = getTool("erpnext_file_list");
+  for (const limit of [0, 501, 2.5, "10"]) {
+    await assertRejects(
+      () =>
+        tool.handler(
+          { attached_to_doctype: "Task", attached_to_name: "TASK-001", limit },
+          makeCtx(makeMockClient()),
+        ),
+      Error,
+      "limit",
+    );
+  }
+});
+
+Deno.test("erpnext_file_list - queries File filtered on both attachment keys", async () => {
+  const tool = getTool("erpnext_file_list");
+  let captured: { doctype?: string; options?: Record<string, unknown> } = {};
+  const client = makeMockClient({
+    list: async (doctype: string, options: Record<string, unknown>) => {
+      captured = { doctype, options };
+      return [
+        {
+          name: "f1",
+          file_name: "protocole-Q1-v3.pdf",
+          file_url: "/private/files/protocole-Q1-v3.pdf",
+          file_size: 253952,
+          is_private: 1,
+          creation: "2026-08-18 10:00:00",
+          modified: "2026-08-18 10:00:00",
+          owner: "alice@casys.ai",
+        },
+        {
+          name: "f2",
+          file_name: "station-4.jpg",
+          file_url: "/files/station-4.jpg",
+          is_private: 0,
+          creation: "2026-08-17 09:00:00",
+          modified: "2026-08-17 09:00:00",
+          owner: "bob@casys.ai",
+        },
+      ];
+    },
+  });
+
+  const result = await tool.handler(
+    { attached_to_doctype: "Task", attached_to_name: "TASK-001" },
+    makeCtx(client),
+  ) as { count: number; data: Record<string, unknown>[] };
+
+  assertEquals(captured.doctype, "File");
+  assertEquals(captured.options?.filters, [
+    ["attached_to_doctype", "=", "Task"],
+    ["attached_to_name", "=", "TASK-001"],
+  ]);
+  assertEquals(captured.options?.limit, 50);
+  assertEquals(captured.options?.order_by, "creation desc");
+
+  assertEquals(result.count, 2);
+  // is_private becomes a real boolean; a missing file_size becomes null, not undefined.
+  assertEquals(result.data[0].is_private, true);
+  assertEquals(result.data[0].file_size, 253952);
+  assertEquals(result.data[1].is_private, false);
+  assertEquals(result.data[1].file_size, null);
+  assertEquals(result.data[1].attached_to_field, null);
+});
+
+Deno.test("erpnext_file_list - forwards an explicit limit", async () => {
+  const tool = getTool("erpnext_file_list");
+  let limit: unknown;
+  const client = makeMockClient({
+    list: async (_d: string, options: Record<string, unknown>) => {
+      limit = options.limit;
+      return [];
+    },
+  });
+  const result = await tool.handler(
+    { attached_to_doctype: "Task", attached_to_name: "TASK-001", limit: 5 },
+    makeCtx(client),
+  ) as { count: number };
+  assertEquals(limit, 5);
+  assertEquals(result.count, 0);
+});
+
 // ── erpnext_file_upload ────────────────────────────────────────────────────
 
 Deno.test("erpnext_file_upload - validates input and delegates to the client", async () => {
@@ -302,11 +416,300 @@ Deno.test("erpnext_file_upload - is marked destructive", () => {
   );
 });
 
+// ── erpnext_file_download ──────────────────────────────────────────────────
+
+Deno.test("erpnext_file_download - is read-only, app-only, and rejects extra schema properties", () => {
+  const tool = getTool("erpnext_file_download");
+  assertEquals(tool.annotations?.readOnlyHint, true);
+  assertEquals(tool._meta?.ui?.visibility, ["app"]);
+  assertEquals(tool._meta?.ui?.resourceUri, "ui://mcp-erpnext/doc-viewer");
+
+  const validator = new SchemaValidator();
+  validator.addSchema(tool.name, tool.inputSchema as Record<string, unknown>);
+  assertEquals(
+    validator.validate(tool.name, {
+      file_id: "FILE-001",
+      attached_to_doctype: "Task",
+      attached_to_name: "TASK-001",
+      file_url: "https://evil.example/report.pdf",
+    }).valid,
+    false,
+  );
+});
+
+Deno.test("erpnext_file_download - validates identifiers before delegation", async () => {
+  const tool = getTool("erpnext_file_download");
+  for (
+    const input of [
+      { attached_to_doctype: "Task", attached_to_name: "TASK-001" },
+      {
+        file_id: " ",
+        attached_to_doctype: "Task",
+        attached_to_name: "TASK-001",
+      },
+      {
+        file_id: "FILE-001",
+        attached_to_doctype: 42,
+        attached_to_name: "TASK-001",
+      },
+    ]
+  ) {
+    await assertRejects(
+      () => tool.handler(input, makeCtx(makeMockClient())),
+      Error,
+      "must be a non-empty string",
+    );
+  }
+});
+
+Deno.test("erpnext_file_download - returns one embedded blob with one base64 copy", async () => {
+  let captured: Record<string, unknown> = {};
+  const result = await getTool("erpnext_file_download").handler(
+    {
+      file_id: " FILE-001 ",
+      attached_to_doctype: " Task ",
+      attached_to_name: " TASK-001 ",
+    },
+    makeCtx(makeMockClient({
+      downloadFile: async (input: Record<string, unknown>) => {
+        captured = input;
+        return {
+          fileId: "FILE-001",
+          fileName: "Q1 report.pdf",
+          mimeType: "application/pdf",
+          bytes: new Uint8Array([0, 255]),
+          isPrivate: true,
+        };
+      },
+    })),
+  ) as {
+    content: Array<{
+      type: string;
+      text?: string;
+      resource?: { uri: string; mimeType: string; blob: string };
+    }>;
+  };
+
+  assertEquals(captured, {
+    fileId: "FILE-001",
+    attachedToDoctype: "Task",
+    attachedToName: "TASK-001",
+  });
+  assertEquals(result.content.length, 2);
+  assertEquals(result.content[0].type, "text");
+  assertEquals(
+    result.content.filter((block) => block.type === "resource").length,
+    1,
+  );
+  assertEquals(result.content[1].resource, {
+    uri: "file:///Q1%20report.pdf",
+    mimeType: "application/pdf",
+    blob: "AP8=",
+  });
+  assertEquals(JSON.stringify(result).split("AP8=").length - 1, 1);
+});
+
+// ── erpnext_doc_get ────────────────────────────────────────────────────────
+
+Deno.test("erpnext_doc_get - binds DOC_META and normalizes doctype without replacing the returned name", async () => {
+  const tool = getTool("erpnext_doc_get");
+  assertEquals(tool._meta?.ui?.resourceUri, "ui://mcp-erpnext/doc-viewer");
+
+  let getArgs: unknown[] = [];
+  const result = await tool.handler(
+    { doctype: " Task ", name: " TASK-001 " },
+    makeCtx(makeMockClient({
+      get: async (...args: unknown[]) => {
+        getArgs = args;
+        return {
+          name: "SERVER-NAME",
+          doctype: "Wrong Type",
+          subject: "Preserved",
+        };
+      },
+    })),
+  ) as { data: Record<string, unknown> };
+
+  assertEquals(getArgs, ["Task", "TASK-001"]);
+  assertEquals(result.data.name, "SERVER-NAME");
+  assertEquals(result.data.doctype, "Task");
+  assertEquals(result.data.subject, "Preserved");
+});
+
 // ── erpnext_doc_list ────────────────────────────────────────────────────────
 
 Deno.test("erpnext_doc_list - has _meta.ui for doclist-viewer", () => {
   const tool = getTool("erpnext_doc_list");
   assertEquals(tool._meta?.ui?.resourceUri, "ui://mcp-erpnext/doclist-viewer");
+});
+
+Deno.test("erpnext_doc_list - schema accepts every Frappe filter value", () => {
+  const tool = getTool("erpnext_doc_list");
+  const validator = new SchemaValidator();
+  validator.addSchema(tool.name, tool.inputSchema as Record<string, unknown>);
+
+  const result = validator.validate(tool.name, {
+    doctype: "Sales Invoice",
+    filters: [
+      ["status", "=", "Unpaid"],
+      ["docstatus", "<", 2],
+      ["disabled", "=", false],
+      ["customer", "is", null],
+      ["status", "in", ["Open", "Closed"]],
+      ["docstatus", "not in", [0, 2]],
+      ["Sales Invoice Item", "item_code", "=", "SKU-001"],
+      ["Sales Invoice Item", "item_code", "in", ["SKU-001", "SKU-002"]],
+    ],
+  });
+
+  assertEquals(result, { valid: true, errors: [] });
+});
+
+Deno.test("erpnext_doc_list - schema preserves legacy string-array filters", () => {
+  const tool = getTool("erpnext_doc_list");
+  const validator = new SchemaValidator();
+  validator.addSchema(tool.name, tool.inputSchema as Record<string, unknown>);
+
+  for (
+    const filter of [
+      ["status", "="],
+      ["Sales Invoice Item", "item_code", "=", "SKU-001", "extra"],
+    ]
+  ) {
+    assertEquals(
+      validator.validate(tool.name, {
+        doctype: "Sales Invoice",
+        filters: [filter],
+      }),
+      { valid: true, errors: [] },
+      `3.0.x-compatible filter must stay accepted: ${JSON.stringify(filter)}`,
+    );
+  }
+});
+
+Deno.test("erpnext_doc_list - schema still rejects unsupported filter values", () => {
+  const tool = getTool("erpnext_doc_list");
+  const validator = new SchemaValidator();
+  validator.addSchema(tool.name, tool.inputSchema as Record<string, unknown>);
+
+  const invalidFilters: unknown[] = [
+    ["docstatus", 1, 1],
+    ["status", "=", { unexpected: true }],
+    ["status", "in", ["Open", false]],
+    ["status", "in", [{ unexpected: true }]],
+  ];
+
+  for (const filter of invalidFilters) {
+    assertEquals(
+      validator.validate(tool.name, {
+        doctype: "Sales Invoice",
+        filters: [filter],
+      }).valid,
+      false,
+      `filter must be rejected: ${JSON.stringify(filter)}`,
+    );
+  }
+});
+
+Deno.test("erpnext_doc_list - forwards bounded pagination and fresh-read options", async () => {
+  let capturedOptions: Record<string, unknown> = {};
+  let capturedReadOptions: Record<string, unknown> = {};
+  const result = await getTool("erpnext_doc_list").handler(
+    {
+      doctype: "Timesheet",
+      fields: ["name"],
+      filters: [["Timesheet Detail", "task", "=", "TASK-001"]],
+      limit: 200,
+      offset: 400,
+      order_by: "name asc",
+      skip_cache: true,
+    },
+    makeCtx(makeMockClient({
+      list: async (
+        _doctype: string,
+        options: Record<string, unknown>,
+        readOptions: Record<string, unknown>,
+      ) => {
+        capturedOptions = options;
+        capturedReadOptions = readOptions;
+        return [{ name: "TS-401" }];
+      },
+    })),
+  ) as Record<string, unknown>;
+
+  assertEquals(capturedOptions, {
+    fields: ["name"],
+    filters: [["Timesheet Detail", "task", "=", "TASK-001"]],
+    limit: 200,
+    limit_start: 400,
+    order_by: "name asc",
+  });
+  assertEquals(capturedReadOptions, { skipCache: true });
+  assertEquals(result.count, 1);
+});
+
+Deno.test("erpnext_doc_list - preserves defaults when pagination and cache options are absent", async () => {
+  let capturedArgs: unknown[] = [];
+  await getTool("erpnext_doc_list").handler(
+    { doctype: "Task" },
+    makeCtx(makeMockClient({
+      list: async (...args: unknown[]) => {
+        capturedArgs = args;
+        return [];
+      },
+    })),
+  );
+
+  assertEquals(capturedArgs, [
+    "Task",
+    {
+      fields: ["name", "modified"],
+      filters: [],
+      limit: 20,
+      order_by: "modified desc",
+    },
+  ]);
+});
+
+Deno.test("erpnext_doc_list - rejects invalid direct-handler pagination and cache inputs", async () => {
+  let listCalls = 0;
+  const ctx = makeCtx(makeMockClient({
+    list: async () => {
+      listCalls++;
+      return [];
+    },
+  }));
+  const invalid: Array<{
+    value: Record<string, unknown>;
+    message: string;
+  }> = [
+    { value: { limit: 0 }, message: "'limit' must be an integer" },
+    { value: { limit: 1.5 }, message: "'limit' must be an integer" },
+    { value: { limit: 5_001 }, message: "'limit' must be an integer" },
+    { value: { limit: "20" }, message: "'limit' must be an integer" },
+    { value: { offset: -1 }, message: "'offset' must be an integer" },
+    { value: { offset: 1.5 }, message: "'offset' must be an integer" },
+    { value: { offset: 100_001 }, message: "'offset' must be an integer" },
+    { value: { offset: "0" }, message: "'offset' must be an integer" },
+    {
+      value: { skip_cache: "true" },
+      message: "'skip_cache' must be a boolean",
+    },
+    { value: { skip_cache: 1 }, message: "'skip_cache' must be a boolean" },
+  ];
+
+  for (const { value, message } of invalid) {
+    await assertRejects(
+      () =>
+        getTool("erpnext_doc_list").handler(
+          { doctype: "Task", ...value },
+          ctx,
+        ),
+      Error,
+      message,
+    );
+  }
+  assertEquals(listCalls, 0);
 });
 
 // ── erpnext_doc_update ──────────────────────────────────────────────────────
@@ -504,4 +907,474 @@ Deno.test("erpnext_doc_unassign - rejects a missing or empty assign_to", async (
     Error,
     "non-empty user email",
   );
+});
+
+// ── erpnext_method_call ─────────────────────────────────────────────────────
+
+function withAllowlist(value?: string): Disposable {
+  const previous = Deno.env.get("ERPNEXT_METHOD_ALLOWLIST");
+  Deno.env.delete("ERPNEXT_METHOD_ALLOWLIST");
+  if (value !== undefined) Deno.env.set("ERPNEXT_METHOD_ALLOWLIST", value);
+
+  return {
+    [Symbol.dispose]() {
+      Deno.env.delete("ERPNEXT_METHOD_ALLOWLIST");
+      if (previous !== undefined) {
+        Deno.env.set("ERPNEXT_METHOD_ALLOWLIST", previous);
+      }
+    },
+  };
+}
+
+Deno.test("erpnext_method_call - exists in operations tools", () => {
+  const tool = getTool("erpnext_method_call");
+  assertEquals(tool.name, "erpnext_method_call");
+  assertEquals(tool.category, "operations");
+});
+
+Deno.test("erpnext_method_call - deny-by-default when ERPNEXT_METHOD_ALLOWLIST is unset", async () => {
+  using _ = withAllowlist(undefined);
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "frappe.client.get_count" },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "is not permitted",
+  );
+});
+
+Deno.test("erpnext_method_call - rejects a method not covered by the allowlist", async () => {
+  using _ = withAllowlist("frappe.client.get_count");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "my_app.api.delete_everything" },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "is not permitted",
+  );
+});
+
+Deno.test("erpnext_method_call - calls an exactly-allowlisted method via POST by default", async () => {
+  using _ = withAllowlist("frappe.client.get_count");
+  let seen: [string, Record<string, unknown>, string] | undefined;
+  const tool = getTool("erpnext_method_call");
+  const result = await tool.handler(
+    { method: "frappe.client.get_count", args: { doctype: "Task" } },
+    makeCtx(makeMockClient({
+      callMethod: async (
+        method: string,
+        args: Record<string, unknown>,
+        httpMethod: string,
+      ) => {
+        seen = [method, args, httpMethod];
+        return 42;
+      },
+    })),
+  );
+  assertEquals(seen, [
+    "frappe.client.get_count",
+    { doctype: "Task" },
+    "POST",
+  ]);
+  assertEquals(result, { data: 42 });
+});
+
+Deno.test("erpnext_method_call - allows a 'prefix.*' wildcard and passes http_method through", async () => {
+  using _ = withAllowlist("my_app.api.*");
+  let seenHttpMethod: string | undefined;
+  const tool = getTool("erpnext_method_call");
+  await tool.handler(
+    { method: "my_app.api.reconcile", http_method: "GET" },
+    makeCtx(makeMockClient({
+      callMethod: async (
+        _method: string,
+        _args: Record<string, unknown>,
+        httpMethod: string,
+      ) => {
+        seenHttpMethod = httpMethod;
+        return null;
+      },
+    })),
+  );
+  assertEquals(seenHttpMethod, "GET");
+});
+
+Deno.test("erpnext_method_call - '*' allows any method", async () => {
+  using _ = withAllowlist("*");
+  const tool = getTool("erpnext_method_call");
+  const result = await tool.handler(
+    { method: "anything.goes.here" },
+    makeCtx(makeMockClient({ callMethod: async () => "ok" })),
+  );
+  assertEquals(result, { data: "ok" });
+});
+
+Deno.test("erpnext_method_call - invalidates the given doctype/name after a mutating call", async () => {
+  using _ = withAllowlist("my_app.api.*");
+  let invalidated: [string, string] | undefined;
+  const tool = getTool("erpnext_method_call");
+  await tool.handler(
+    {
+      method: "my_app.api.mark_paid",
+      invalidate: { doctype: "Sales Invoice", name: "SINV-001" },
+    },
+    makeCtx(makeMockClient({
+      callMethod: async () => ({ ok: true }),
+      invalidate: (doctype: string, name: string) => {
+        invalidated = [doctype, name];
+      },
+    })),
+  );
+  assertEquals(invalidated, ["Sales Invoice", "SINV-001"]);
+});
+
+Deno.test("erpnext_method_call - rejects a missing or empty method", async () => {
+  using _ = withAllowlist("*");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "  " },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "non-empty dotted path",
+  );
+});
+
+Deno.test("erpnext_method_call - rejects a malformed method path", async () => {
+  using _ = withAllowlist("*");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "frappe.client.*" },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "not a valid dotted path",
+  );
+});
+
+Deno.test("erpnext_method_call - rejects a non-object args", async () => {
+  using _ = withAllowlist("*");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "frappe.client.get_count", args: "nope" },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "'args' must be an object",
+  );
+});
+
+Deno.test("erpnext_method_call - rejects an invalid http_method", async () => {
+  using _ = withAllowlist("*");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        { method: "frappe.client.get_count", http_method: "DELETE" },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "'http_method' must be 'GET' or 'POST'",
+  );
+});
+
+Deno.test("erpnext_method_call - rejects an incomplete invalidate object", async () => {
+  using _ = withAllowlist("*");
+  await assertRejects(
+    () =>
+      getTool("erpnext_method_call").handler(
+        {
+          method: "frappe.client.get_count",
+          invalidate: { doctype: "Task" },
+        },
+        makeCtx(makeMockClient()),
+      ),
+    Error,
+    "'invalidate' requires non-empty",
+  );
+});
+
+// ── Purchase Invoice 417 hints (Issue 34) ────────────────────────────────────
+
+Deno.test("erpnext_doc_create - Purchase Invoice without rounding flag is accepted", async () => {
+  let captured: Record<string, unknown> = {};
+  const result = await getTool("erpnext_doc_create").handler(
+    { doctype: "Purchase Invoice", data: { supplier: "Acme" } },
+    makeCtx(makeMockClient({
+      create: async (_doctype: string, data: Record<string, unknown>) => {
+        captured = data;
+        return { name: "PINV-001", ...data };
+      },
+    })),
+  ) as Record<string, unknown>;
+
+  assertEquals(captured, { supplier: "Acme" });
+  assertEquals(
+    result.message,
+    "Purchase Invoice PINV-001 created successfully",
+  );
+});
+
+Deno.test("erpnext_doc_create - optional disable_rounded_total passes unchanged", async () => {
+  for (const rounding of [0, 1] as const) {
+    let captured: Record<string, unknown> = {};
+    await getTool("erpnext_doc_create").handler(
+      {
+        doctype: "Purchase Invoice",
+        data: { supplier: "Acme", disable_rounded_total: rounding },
+      },
+      makeCtx(makeMockClient({
+        create: async (_doctype: string, data: Record<string, unknown>) => {
+          captured = data;
+          return { name: "PINV-001", ...data };
+        },
+      })),
+    );
+    assertEquals(captured.disable_rounded_total, rounding);
+  }
+});
+
+Deno.test("erpnext_doc_create/update/submit - public schema stays generic", () => {
+  const create = getTool("erpnext_doc_create");
+  const update = getTool("erpnext_doc_update");
+  const submit = getTool("erpnext_doc_submit");
+  const createData = String(
+    (create.inputSchema.properties?.data as { description?: string })
+      ?.description ?? "",
+  );
+  const updateData = String(
+    (update.inputSchema.properties?.data as { description?: string })
+      ?.description ?? "",
+  );
+  const submitProps = submit.inputSchema.properties ?? {};
+
+  assertEquals(create.description.includes("disable_rounded_total"), false);
+  assertEquals(createData.includes("Purchase Invoice"), false);
+  assertEquals(updateData.includes("Purchase Invoice"), false);
+  assertEquals("expected_total" in submitProps, false);
+  assertEquals("expected_currency" in submitProps, false);
+  assertEquals(submit.inputSchema.required, ["doctype", "name"]);
+});
+
+Deno.test("erpnext_doc_submit - Purchase Invoice with only doctype/name matches baseline keys", async () => {
+  const tool = getTool("erpnext_doc_submit");
+  const so = await tool.handler(
+    { doctype: "Sales Order", name: "SO-001" },
+    makeCtx(makeMockClient({
+      get: async () => ({ name: "SO-001", modified: "2026-01-01 00:00:00" }),
+      callMethod: async () => ({ name: "SO-001", docstatus: 1 }),
+    })),
+  ) as Record<string, unknown>;
+  const pi = await tool.handler(
+    { doctype: "Purchase Invoice", name: "PINV-001" },
+    makeCtx(makeMockClient({
+      get: async (
+        _doctype: string,
+        _name: string,
+        opts?: { skipCache?: boolean },
+      ) => {
+        assertEquals(opts?.skipCache, true);
+        return { name: "PINV-001", modified: "2026-01-01 00:00:00" };
+      },
+      callMethod: async (
+        _method: string,
+        args: { doc: Record<string, unknown> },
+      ) => {
+        assertEquals(args.doc.modified, "2026-01-01 00:00:00");
+        return { name: "PINV-001", docstatus: 1 };
+      },
+    })),
+  ) as Record<string, unknown>;
+
+  assertEquals(Object.keys(pi).sort(), Object.keys(so).sort());
+  assertEquals(pi.message, "Purchase Invoice PINV-001 submitted successfully");
+  assertEquals("total_verification" in pi, false);
+});
+
+Deno.test("erpnext_doc_submit - extra expected_* fields are ignored", async () => {
+  const result = await getTool("erpnext_doc_submit").handler(
+    {
+      doctype: "Purchase Invoice",
+      name: "PINV-001",
+      expected_total: 3.6,
+      expected_currency: "EUR",
+    },
+    makeCtx(makeMockClient({
+      get: async () => ({ name: "PINV-001", modified: "2026-01-01 00:00:00" }),
+      callMethod: async () => ({ name: "PINV-001", docstatus: 1 }),
+    })),
+  ) as Record<string, unknown>;
+
+  assertEquals(
+    result.message,
+    "Purchase Invoice PINV-001 submitted successfully",
+  );
+  assertEquals("total_verification" in result, false);
+});
+
+Deno.test("erpnext_doc_submit - Purchase Invoice keeps rounded-total fallback", async () => {
+  let submittedDoc: Record<string, unknown> = {};
+  const result = await getTool("erpnext_doc_submit").handler(
+    { doctype: "Purchase Invoice", name: "PINV-001" },
+    makeCtx(makeMockClient({
+      get: async () => ({
+        name: "PINV-001",
+        base_rounded_total: null,
+        modified: "2026-01-01 00:00:00",
+      }),
+      callMethod: async (
+        _method: string,
+        args: { doc: Record<string, unknown> },
+      ) => {
+        submittedDoc = args.doc;
+        return { name: "PINV-001", docstatus: 1 };
+      },
+    })),
+  ) as Record<string, unknown>;
+
+  assertEquals(submittedDoc.disable_rounded_total, 1);
+  assertEquals((result.warnings as string[]).length, 1);
+});
+
+Deno.test("erpnext_doc_create/update/submit - known 417 hints preserve error identity", async () => {
+  const cases: Array<{
+    name: string;
+    tool: string;
+    input: Record<string, unknown>;
+    method: "create" | "update" | "callMethod";
+    error: FrappeAPIError;
+    hint: string | undefined;
+  }> = [
+    {
+      name: "empty HTML Party Account on create",
+      tool: "erpnext_doc_create",
+      input: { doctype: "Purchase Invoice", data: { supplier: "Acme" } },
+      method: "create",
+      error: new FrappeAPIError(
+        "POST failed: Party Account <strong></strong> currency (None) and document currency (EUR) should be same",
+        417,
+        {
+          message:
+            "Party Account <strong></strong> currency (None) and document currency (EUR) should be same",
+        },
+        800,
+      ),
+      hint: "credit_to",
+    },
+    {
+      name: "literal None Party Account on update",
+      tool: "erpnext_doc_update",
+      input: {
+        doctype: "Purchase Invoice",
+        name: "PINV-001",
+        data: { bill_no: "X" },
+      },
+      method: "update",
+      error: new FrappeAPIError(
+        "POST failed: Party Account None currency (None) and document currency (EUR) should be same",
+        417,
+        {
+          message:
+            "Party Account None currency (None) and document currency (EUR) should be same",
+        },
+      ),
+      hint: "credit_to",
+    },
+    {
+      name: "GRNI missing default on submit",
+      tool: "erpnext_doc_submit",
+      input: { doctype: "Purchase Invoice", name: "PINV-001" },
+      method: "callMethod",
+      error: new FrappeAPIError(
+        "Please set default Stock Received But Not Billed in Company",
+        417,
+        {
+          message:
+            "Please set default Stock Received But Not Billed in Company",
+        },
+      ),
+      hint: "stock_received_but_not_billed",
+    },
+    {
+      name: "named account is unchanged",
+      tool: "erpnext_doc_create",
+      input: { doctype: "Purchase Invoice", data: { supplier: "Acme" } },
+      method: "create",
+      error: new FrappeAPIError(
+        "POST failed: Party Account Creditors - ABC currency (None) and document currency (EUR) should be same",
+        417,
+        {
+          message:
+            "Party Account Creditors - ABC currency (None) and document currency (EUR) should be same",
+        },
+      ),
+      hint: undefined,
+    },
+    {
+      name: "disabled GRNI is unchanged",
+      tool: "erpnext_doc_create",
+      input: { doctype: "Purchase Invoice", data: { supplier: "Acme" } },
+      method: "create",
+      error: new FrappeAPIError(
+        "Account Stock Received But Not Billed - ACME is disabled",
+        417,
+        { message: "Account Stock Received But Not Billed - ACME is disabled" },
+        500,
+      ),
+      hint: undefined,
+    },
+  ];
+
+  for (const item of cases) {
+    const prefix = item.error.message;
+    const body = item.error.body;
+    const retryAfter = item.error.retryAfterMs;
+    let invalidated = 0;
+    try {
+      await getTool(item.tool).handler(
+        item.input,
+        makeCtx(makeMockClient({
+          get: async () => ({
+            name: "PINV-001",
+            modified: "2026-01-01 00:00:00",
+          }),
+          [item.method]: async () => {
+            throw item.error;
+          },
+          invalidate: () => {
+            invalidated++;
+          },
+        })),
+      );
+      throw new Error(`expected throw: ${item.name}`);
+    } catch (error) {
+      assertStrictEquals(error, item.error, item.name);
+      assertEquals(item.error.status, 417, item.name);
+      assertEquals(item.error.body, body, item.name);
+      assertEquals(item.error.retryAfterMs, retryAfter, item.name);
+      assertEquals(item.error.message.startsWith(prefix), true, item.name);
+      assertEquals(invalidated, 0, item.name);
+      if (item.hint) {
+        assertEquals(item.error.message.includes(item.hint), true, item.name);
+      } else {
+        assertEquals(item.error.message, prefix, item.name);
+        assertEquals(
+          item.error.message.includes("credit_to"),
+          false,
+          item.name,
+        );
+        assertEquals(
+          item.error.message.includes("stock_received_but_not_billed"),
+          false,
+          item.name,
+        );
+      }
+    }
+  }
 });

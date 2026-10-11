@@ -9,6 +9,7 @@
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { salesTools } from "./sales.ts";
+import { AmbiguousLinkError } from "../api/resolve.ts";
 import type { FrappeClient } from "../api/frappe-client.ts";
 import type { ErpNextToolContext } from "./types.ts";
 
@@ -139,6 +140,7 @@ Deno.test("erpnext_sales_order_get - returns sales order data", async () => {
   const doc = (result.data ?? result) as Record<string, unknown>;
   assertEquals(doc.name, "SO-001");
   assertEquals(doc.customer, "CUST-001");
+  assertEquals(doc.doctype, "Sales Order");
 });
 
 // ── erpnext_sales_order_create ────────────────────────────────────────────────
@@ -184,7 +186,12 @@ Deno.test("erpnext_sales_order_create - creates order successfully", async () =>
   // Tool returns { data: doc, message: "..." }
   const doc = (result.data ?? result) as Record<string, unknown>;
   assertEquals(doc.name, "SO-NEW-001");
+  assertEquals(doc.doctype, "Sales Order");
   assertEquals(createdData.customer, "CUST-001");
+  assertEquals(result.refreshRequest, {
+    toolName: "erpnext_sales_order_get",
+    arguments: { name: "SO-NEW-001" },
+  });
 });
 
 // ── erpnext_sales_invoice_list ────────────────────────────────────────────────
@@ -215,6 +222,35 @@ Deno.test("erpnext_sales_invoice_list - returns invoices with _meta.ui", async (
   assertEquals(
     (result._meta as { ui: { resourceUri: string } }).ui.resourceUri,
     "ui://mcp-erpnext/doclist-viewer",
+  );
+});
+
+Deno.test("erpnext_sales_invoice_create - refreshes through the read-only get tool", async () => {
+  const mockClient = makeMockClient({
+    create: async () => ({
+      name: "SINV-NEW-001",
+      doctype: "Sales Invoice",
+      customer: "CUST-001",
+      items: [],
+    }),
+  });
+
+  const tool = getTool("erpnext_sales_invoice_create");
+  const result = await tool.handler(
+    {
+      customer: "CUST-001",
+      items: [{ item_code: "ITEM-001", qty: 1, rate: 100 }],
+    },
+    makeCtx(mockClient),
+  ) as Record<string, unknown>;
+
+  assertEquals(result.refreshRequest, {
+    toolName: "erpnext_sales_invoice_get",
+    arguments: { name: "SINV-NEW-001" },
+  });
+  assertEquals(
+    (result.data as Record<string, unknown>).doctype,
+    "Sales Invoice",
   );
 });
 
@@ -269,16 +305,56 @@ Deno.test("erpnext_quotation_create - resolves party_name before building the cr
   });
 
   const tool = getTool("erpnext_quotation_create");
-  await tool.handler(
+  const result = await tool.handler(
     {
       quotation_to: "Customer",
       party_name: "Acme Corp",
       items: [{ item_code: "ITEM-001", qty: 1, rate: 100 }],
     },
     makeCtx(client),
-  );
+  ) as Record<string, unknown>;
 
   assertEquals(createdData.party_name, "CUST-042");
+  assertEquals((result.data as Record<string, unknown>).doctype, "Quotation");
+  assertEquals(result.refreshRequest, {
+    toolName: "erpnext_quotation_get",
+    arguments: { name: "QTN-NEW-001" },
+  });
+});
+
+Deno.test("erpnext_quotation_create - reports party_name ambiguity before create", async () => {
+  const { FrappeAPIError } = await import("../api/frappe-client.ts");
+  let createCalls = 0;
+  const client = makeMockClient({
+    get: async () => {
+      throw new FrappeAPIError("not found", 404, null);
+    },
+    list: async () => [
+      { name: "CUST-001", customer_name: "Ambiguous Co" },
+      { name: "CUST-002", customer_name: "Ambiguous Co" },
+    ],
+    create: async () => {
+      createCalls++;
+      return { name: "QTN-NEW-001" };
+    },
+  });
+
+  const tool = getTool("erpnext_quotation_create");
+  const error = await assertRejects(
+    () =>
+      tool.handler(
+        {
+          quotation_to: "Customer",
+          party_name: "Ambiguous Co",
+          items: [{ item_code: "ITEM-001", qty: 1, rate: 100 }],
+        },
+        makeCtx(client),
+      ),
+    AmbiguousLinkError,
+  );
+
+  assertEquals(error.inputPath, "party_name");
+  assertEquals(createCalls, 0);
 });
 
 // ── erpnext_sales_order_submit / erpnext_sales_invoice_submit ────────────────
@@ -322,6 +398,11 @@ Deno.test("erpnext_sales_order_submit - disables rounded total when base_rounded
   assertEquals((result.warnings as string[]).length, 1);
   assertEquals(skipCache, true);
   assertEquals(invalidated, ["Sales Order", "SO-001"]);
+  assertEquals((result.data as Record<string, unknown>).doctype, "Sales Order");
+  assertEquals(result.refreshRequest, {
+    toolName: "erpnext_sales_order_get",
+    arguments: { name: "SO-001" },
+  });
 });
 
 Deno.test("erpnext_sales_invoice_submit - disables rounded total when base_rounded_total is null (fresh instance)", async () => {
@@ -363,6 +444,14 @@ Deno.test("erpnext_sales_invoice_submit - disables rounded total when base_round
   assertEquals((result.warnings as string[]).length, 1);
   assertEquals(skipCache, true);
   assertEquals(invalidated, ["Sales Invoice", "SINV-001"]);
+  assertEquals(
+    (result.data as Record<string, unknown>).doctype,
+    "Sales Invoice",
+  );
+  assertEquals(result.refreshRequest, {
+    toolName: "erpnext_sales_invoice_get",
+    arguments: { name: "SINV-001" },
+  });
 });
 
 Deno.test("erpnext_sales_order_cancel - invalidates the cancelled document", async () => {

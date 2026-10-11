@@ -17,9 +17,11 @@ const viewer = (name: string): MCPToolMeta => ({
 });
 
 export const DOCLIST_META = viewer("doclist-viewer");
+export const DOC_META = viewer("doc-viewer");
 export const INVOICE_META = viewer("invoice-viewer");
 export const STOCK_META = viewer("stock-viewer");
 export const CHART_META = viewer("chart-viewer");
 export const KANBAN_META = viewer("kanban-viewer");
 export const KPI_META = viewer("kpi-viewer");
 export const FUNNEL_META = viewer("funnel-viewer");
+export const BUY_EVIDENCE_META = viewer("buy-evidence-viewer");

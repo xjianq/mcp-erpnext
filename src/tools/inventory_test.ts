@@ -74,7 +74,6 @@ Deno.test("erpnext_item_create - forwards optional fields", async () => {
       item_code: "WIDGET-1",
       item_name: "Widget",
       item_group: "Products",
-      uom: "Nos",
       is_stock_item: true,
       standard_rate: 25.5,
     },
@@ -83,9 +82,27 @@ Deno.test("erpnext_item_create - forwards optional fields", async () => {
 
   assertEquals(capturedData.item_code, "WIDGET-1");
   assertEquals(capturedData.item_group, "Products");
-  assertEquals(capturedData.uom, "Nos");
   assertEquals(capturedData.is_stock_item, true);
   assertEquals(capturedData.standard_rate, 25.5);
+});
+
+Deno.test("erpnext_item_create - maps public uom to ERPNext stock_uom", async () => {
+  let capturedData: Record<string, unknown> | undefined;
+  const mockClient = makeMockClient({
+    create: async (_doctype: string, data: Record<string, unknown>) => {
+      capturedData = data;
+      return { name: "WIDGET-1" };
+    },
+  });
+
+  const tool = getTool("erpnext_item_create");
+  await tool.handler(
+    { item_code: "WIDGET-1", item_name: "Widget", uom: "Nos" },
+    makeCtx(mockClient),
+  );
+
+  assertEquals(capturedData?.stock_uom, "Nos");
+  assertEquals(capturedData && "uom" in capturedData, false);
 });
 
 // ── erpnext_item_update ──────────────────────────────────────────────────────
@@ -147,6 +164,34 @@ Deno.test("erpnext_stock_balance - applies item_code and warehouse filters", asy
   ]);
   assertEquals(result.doctype, "Bin");
   assertEquals(result.count, 1);
+});
+
+Deno.test("erpnext_stock_entry_list - declares and applies the exact child item_code filter", async () => {
+  let capturedDoctype = "";
+  let capturedFilters: unknown;
+  const mockClient = makeMockClient({
+    list: async (doctype: string, opts: { filters?: unknown }) => {
+      capturedDoctype = doctype;
+      capturedFilters = opts.filters;
+      return [];
+    },
+  });
+
+  const tool = getTool("erpnext_stock_entry_list");
+  assertEquals(
+    (tool.inputSchema.properties?.item_code as { type?: string })?.type,
+    "string",
+  );
+  await tool.handler(
+    { item_code: "WIDGET-1", stock_entry_type: "Material Issue" },
+    makeCtx(mockClient),
+  );
+
+  assertEquals(capturedDoctype, "Stock Entry");
+  assertEquals(capturedFilters, [
+    ["Stock Entry Detail", "item_code", "=", "WIDGET-1"],
+    ["stock_entry_type", "=", "Material Issue"],
+  ]);
 });
 
 // ── erpnext_stock_entry_create ───────────────────────────────────────────────

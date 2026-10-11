@@ -4,22 +4,30 @@ English | [繁體中文](README.zh-TW.md)
 
 [![JSR](https://jsr.io/badges/@casys/mcp-erpnext)](https://jsr.io/@casys/mcp-erpnext)
 [![npm](https://img.shields.io/npm/v/@casys/mcp-erpnext?logo=npm&color=cb3837)](https://www.npmjs.com/package/@casys/mcp-erpnext)
-[![CI](https://github.com/Casys-AI/mcp-erpnext/actions/workflows/test.yml/badge.svg)](https://github.com/Casys-AI/mcp-erpnext/actions/workflows/test.yml)
+[![CI](https://github.com/superWorldSavior/mcp-erpnext/actions/workflows/test.yml/badge.svg)](https://github.com/superWorldSavior/mcp-erpnext/actions/workflows/test.yml)
 [![MCP](https://img.shields.io/badge/MCP-server-1f6feb?logo=modelcontextprotocol&logoColor=white)](https://modelcontextprotocol.io)
+[![M8ven Score](https://m8ven.ai/badge/mcp/casys-ai-mcp-erpnext-1kev4k)](https://m8ven.ai/mcp/casys-ai-mcp-erpnext-1kev4k)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-MCP server for [ERPNext](https://erpnext.com) / Frappe ERP — **124 tools**
-across **14 categories**, with **7 interactive UI viewers**.
+> [!IMPORTANT]
+> **Installing the 3.1 beta:** for npm/Node use
+> `npx -y @casys/mcp-erpnext@next`; for Deno use
+> `deno run -A jsr:@casys/mcp-erpnext@^3.1.0-beta/server`. Both follow the
+> current prerelease — JSR has no dist-tags, hence the range there. Exact
+> versions are in the [CHANGELOG](CHANGELOG.md). The beta adds the generic
+> document viewer and attachment workflows, so test it with the MCP host your
+> users actually run before replacing a stable deployment.
 
-Connect any MCP-compatible AI agent (Claude Desktop, Claude Code, VS Code
-Copilot, custom) to your ERPNext instance via the
-[Model Context Protocol](https://modelcontextprotocol.io).
+Let any MCP-compatible AI agent operate your [ERPNext](https://erpnext.com) /
+Frappe instance — documents, workflows, and interactive viewers inside the host
+(Claude Desktop, Claude Code, VS Code Copilot, or custom).
 
 Works with **self-hosted** and **ERPNext Cloud** (frappe.cloud) instances.
 
-> Built on **[@casys/mcp-server](https://github.com/Casys-AI/mcp-server)** — the
-> MCP server framework (concurrency, auth, MCP Apps, observability) that powers
-> this project.
+> Built on
+> **[@casys/mcp-server](https://github.com/superWorldSavior/mcp-platform)** —
+> the MCP server framework (concurrency, auth, MCP Apps, observability) that
+> powers this project.
 
 ## Screenshots
 
@@ -72,8 +80,28 @@ results.
 ## What's New
 
 See the [CHANGELOG](CHANGELOG.md) for the full release history, or the
-[latest release](https://github.com/Casys-AI/mcp-erpnext/releases/latest) for
-the current version's highlights.
+[latest release](https://github.com/superWorldSavior/mcp-erpnext/releases/latest)
+for the current version's highlights.
+
+> **3.1 beta preview:** the beta keeps the 3.0 tool surface and adds a generic
+> document viewer, child tables, document attachments, in-view navigation, and
+> active context. **3.1.0-beta.11** adds reversible context selection, compact
+> Kanban details with distinct Timesheet counts, exact selected-document
+> navigation, five more host languages, and correct generic Company columns. It
+> also retains bounded metadata for unpriced Buy lines and adds offline demo
+> import plans. Features remain capability-gated by the MCP host; Buy evidence
+> does not purchase or qualify a live ERP.
+
+## Documentation
+
+Organised by what you are doing, following [Diátaxis](https://diataxis.fr):
+
+|                                       |                                                                                                                                                                                                                       |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Learning** — never used this before | [Your first tool call](docs/tutorial-first-tool-call.md) — from nothing to a working response in four steps                                                                                                           |
+| **Doing** — you have a specific goal  | [Seed a blank ERPNext instance](docs/fresh-instance-setup.md) · [Run the HTTP server](docs/http-deployment.md) · [Set up OAuth](docs/oauth-setup.md) · [Migrate to 2026-07-28](docs/migration-mcp-spec-2026-07-28.md) |
+| **Looking something up**              | [Tools](docs/tools.md) · [Environment variables](docs/environment-variables.md) · [DocType coverage](docs/coverage.md)                                                                                                |
+| **Understanding why**                 | [Concepts](docs/concepts.md) — link resolution, transports, MRTR, and which cache does what · [ERPNext quirks](docs/erpnext-quirks.md)                                                                                |
 
 ## Quick Start
 
@@ -148,30 +176,9 @@ Add to `.vscode/mcp.json`:
 
 ### HTTP mode
 
-```bash
-ERPNEXT_URL=http://localhost:8000 \
-ERPNEXT_API_KEY=xxx \
-ERPNEXT_API_SECRET=xxx \
-npx -y @casys/mcp-erpnext --http --port=3012
-```
-
-> **Note:** HTTP mode binds to `127.0.0.1` (loopback) by default as of v2.4.2.
-> For Docker or multi-host setups, add `--hostname=0.0.0.0`.
-
-### Deno (HTTP mode)
-
-```bash
-ERPNEXT_URL=http://localhost:8000 \
-ERPNEXT_API_KEY=xxx \
-ERPNEXT_API_SECRET=xxx \
-deno run -A npm:@casys/mcp-erpnext --http --port=3012
-```
-
-> **Note:** Versions ≤ 2.3.1 of the npm bundle crashed with
-> `ReferenceError: Deno is not defined` in HTTP mode — fixed in 2.4.0
-> (`@casys/mcp-server` ≥ 0.21.1). If you hit this error, upgrade with
-> `npx -y @casys/mcp-erpnext@latest`, or use the Deno runner above. See
-> [`docs/known-issues.md`](docs/known-issues.md).
+For a shared, always-on server rather than one process per client:
+[how to run the HTTP server](docs/http-deployment.md). Note it is breaking for
+pre-2026 HTTP clients in 3.0.0.
 
 ### Category filtering
 
@@ -183,202 +190,197 @@ npx -y @casys/mcp-erpnext --categories=sales,inventory
 
 ## Fresh Instance Setup
 
-On a fresh ERPNext instance (no setup wizard), you need to create master data
-before using business tools. Use `erpnext_doc_create` for prerequisites:
-
-```
-1. Warehouse Types: Transit, Default
-2. UOMs: Nos, Kg, Unit, Set, Meter
-3. Item Groups: All Item Groups (is_group=1), then Products, Raw Material (parent=All Item Groups)
-4. Territories: All Territories (is_group=1), then France, etc.
-5. Customer Groups: All Customer Groups (is_group=1), then Commercial, etc.
-6. Supplier Groups: All Supplier Groups (is_group=1), then Hardware, etc.
-7. Company: requires Warehouse Types to exist first
-```
+A blank ERPNext instance has no master data, so business tools fail validation
+until it exists. See
+[Seed a blank ERPNext instance](docs/fresh-instance-setup.md).
 
 ## UI Viewers
 
-Seven interactive [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+Nine interactive [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
 viewers, registered as `ui://mcp-erpnext/{name}`:
 
-| Viewer           | Description                                                      | Interactive Features                                                                                                                               |
-| ---------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `doclist-viewer` | Generic document table with sort, filter, pagination, CSV export | Row click → inline detail panel with Submit/Cancel + sendMessage navigation. Chip filters for status columns. Max 6 columns, rest in detail panel. |
-| `invoice-viewer` | Sales/Purchase Invoice with parties, items, totals               | Item click → stock balance + item info panel. Submit/Cancel/Payment actions. sendMessage to payment entries and customer invoices.                 |
-| `stock-viewer`   | Stock balance table with color-coded qty badges                  | Row click → item info + recent movements. sendMessage to stock chart, item details, stock entries.                                                 |
-| `chart-viewer`   | Universal chart renderer (12 types via Recharts)                 | Click bar/pie/line data points → sendMessage drill-down into underlying documents.                                                                 |
-| `kanban-viewer`  | Read-write kanban for Task, Opportunity, Issue                   | Drag-and-drop moves, inline edit (priority, progress, dates), sendMessage to Timesheets/Quotations/Related docs.                                   |
-| `kpi-viewer`     | Big number card with delta, sparkline, trend                     | Click number → sendMessage to exception list. Click sparkline → trend chart.                                                                       |
-| `funnel-viewer`  | Trapezoid sales funnel with conversion rates                     | Click stage → sendMessage to document list at that stage. Stage action buttons.                                                                    |
+| Viewer                | Description                                                      | Interactive Features                                                                          |
+| --------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `doc-viewer`          | Generic ERPNext document with fields and child tables            | Capability-gated attachments, typed navigation, guarded Submit/Cancel, and raw JSON fallback. |
+| `doclist-viewer`      | Generic document table with sort, filter, pagination, CSV export | Inline details, typed nested navigation, Submit/Cancel, and compact status filters.           |
+| `invoice-viewer`      | Sales Orders, Sales Invoices, and Quotations with line totals    | Item, stock, party, and payment navigation plus guarded Submit/Cancel actions.                |
+| `stock-viewer`        | Stock balance table with color-coded qty badges                  | Item details, recent movements, stock charts, and stock-entry navigation.                     |
+| `chart-viewer`        | Universal chart renderer (12 types via Recharts)                 | Exact point/series navigation and active-context selection across simple and composed charts. |
+| `kanban-viewer`       | Read-write kanban for Task, Opportunity, Issue                   | Drag-and-drop, inline editing, serialized saves, and typed related-document navigation.       |
+| `kpi-viewer`          | Big number card with delta, sparkline, trend                     | Number and trend navigation with bounded active-context selection.                            |
+| `funnel-viewer`       | Trapezoid sales funnel with conversion rates                     | Period-aware stage navigation and bounded active-context selection.                           |
+| `buy-evidence-viewer` | Immutable sealed Buy evidence (recorded session only)            | Complete, partial, unresolved, and unavailable projections; no live ERP refresh or mutation.  |
 
-### Cross-viewer navigation
+### Navigation and active context
 
-Viewers communicate via `app.sendMessage()` — clicking a button in one viewer
-injects a message into the conversation, which triggers the AI to call the right
-tool and open the appropriate viewer.
+Viewers progressively select the best interaction supported by the host:
 
-The server auto-injects navigation metadata into tool results:
+- `serverTools` opens typed list, record, and chart targets inside the current
+  viewer through `app.callServerTool()`. Back and breadcrumb navigation restore
+  the state of each level.
+- `downloadFile` lets the host confirm and save an attachment returned as a
+  bounded embedded resource. The viewer never opens an ERPNext file URL
+  directly.
+- `updateModelContext` lets chart, KPI, and funnel selections join a bounded
+  active-context snapshot. The compact context chip keeps up to eight items and
+  lets users remove one item or clear them all. The snapshot contains selected
+  values, never hidden instructions for the model.
+- `message.text` keeps `app.sendMessage()` as a conversational fallback when
+  direct navigation or context replacement is unavailable.
+- Without these capabilities, local inspection remains available and unsupported
+  remote actions are omitted.
+- The Buy evidence viewer is recorded-session only. It does not call server
+  tools, refresh live documents, or mutate ERP state.
 
-- `_rowAction` — which tool to call when a row is clicked
-- `_sendMessageHints` — navigation buttons shown in detail panels (e.g.
-  "Orders", "Invoices")
-- `_drillDown` / `_trendDrillDown` — sendMessage templates for KPI and chart
-  click-through
+The server supplies typed navigation metadata and the exact `_availableTools`
+allowed for each viewer, so category-filtered deployments do not expose tools
+that are not loaded.
 
 ### Refresh model
 
-All viewers carry a `refreshRequest` payload for safe revalidation via
-`app.callServerTool()`:
-
-- `kanban-viewer` revalidates after mutations and on focus
-- All other viewers support focus refresh + manual refresh button
+Read-only viewers revalidate on focus and through their refresh control.
+Mutations use an explicit read-only request to fetch committed state; a mutating
+tool is never replayed automatically. Overlapping or stale responses are ignored
+when a newer host payload or mutation has already won. A confirmed document
+change marks every potentially derived snapshot in the current navigation stack
+as stale; each marker is removed only when that surface has actually been read
+again. Separate MCP Apps are not synchronized automatically in the 3.1 beta.
 
 ### Building UI viewers
 
 ```bash
 cd src/ui
-npm install
+npm ci
 node build-all.mjs
 ```
 
-## Tools (124)
+## Buy evidence capture
 
-124 tools across 14 categories. Each `_list` tool returns interactive results
-via the doclist-viewer with row click, inline detail, and cross-viewer
-navigation.
+**One** read-only tool and **one** recorded App. They do not purchase, create a
+BOM/RFQ/PO, refresh live documents, replace generic ERP viewers, or qualify a
+live ERPNext instance.
 
-- **Sales** (17) — Customers, Sales Orders, Invoices, and Quotations with full
-  CRUD, Submit, and Cancel.
-- **Purchasing** (11) — Suppliers, Purchase Orders, Purchase Invoices, Receipts,
-  and Supplier Quotations.
-- **Inventory** (9) — Items, Stock Balance, Warehouses, and Stock Entries.
-- **Accounting** (6) — Chart of Accounts, Journal Entries, and Payment Entries.
-- **HR** (12) — Employees, Attendance, Leave Applications, Salary Slips, Payroll
+- Tool: `erpnext_buy_capture`. Closed DocTypes only (Item, BOM, Item Price,
+  Supplier Quotation, Supplier, Price List, UOM, Currency Exchange). Two
+  `skipCache` reads must agree on `modified` and the closed projection
+  fingerprint. Return is ephemeral canonical JSON + SHA-256 + byte count. The
+  caller cannot pass `sourceInstance`, URL, credentials, `capturedAt`, or a
+  digest. Digital Thread stores those bytes in its own CAS; this server does not
+  keep a second CAS.
+- App: `io.casys.mcp-erpnext.buy-evidence` `3.1.0-beta.11`, resource
+  `ui://mcp-erpnext/buy-evidence-viewer` (`text/html;profile=mcp-app`), manifest
+  `ui://mcp-erpnext/buy-evidence-manifest` (`application/json`),
+  `acceptedActions` = `viewer.session.apply` only. Complete, partial,
+  unresolved, and unavailable projections stay labelled. No live DocViewer
+  refresh, mutation, or `app.callServerTool`. Session `anchor` is the sealed
+  Digital Thread artefact (`provenance.bundleRef`), not a hash of the displayed
+  projection.
+- Schemas: `io.casys.mcp-erpnext.buy-source-capture/1.0`,
+  `io.casys.mcp-erpnext.buy-recorded-result/1.0` and `/2.0`,
+  `io.casys.mcp-erpnext.buy-recorded-session/1.0`.
+- Result `/2.0` carries bounded `excludedLines` metadata for selected lines
+  absent from priced `lines`: exact line ID, quantity, unit, and stated reason.
+  It carries no amount, currency, or price source; covered subtotals remain
+  sealed values and unresolved lines remain visible.
+- The viewer is built with the other MCP Apps
+  (`cd src/ui && npm ci && node
+  build-all.mjs`). Published JSR/npm artifacts
+  include `src/ui/dist/` and the Buy TypeScript module; the HTML resource and
+  generated manifest are what a published installation serves.
+
+Digital Thread owns configuration/seal (`buy-configuration/1.0`,
+`buy-cost-bundle/1.0`, `buy.capture-configuration-cost@1`,
+`buy.seal-configuration-cost@1`). A qualified
+`commerce.read-erpnext-buy-source@1` binding is required before dispatch.
+
+## Tools
+
+Record `_list` tools return interactive results via the doclist-viewer with row
+click, inline detail, and cross-viewer navigation. The attachment-specific
+`erpnext_file_list` tool does not render doclist-viewer. Generic and dedicated
+document reads use `doc-viewer`, except Sales Order, Sales Invoice, and
+Quotation, which retain the specialized invoice surface.
+
+- **Sales** — Customers, Sales Orders, Invoices, and Quotations with full CRUD,
+  Submit, and Cancel.
+- **Purchasing** — Suppliers, Purchase Orders, Purchase Invoices, Receipts, and
+  Supplier Quotations.
+- **Inventory** — Items, Stock Balance, Warehouses, and Stock Entries.
+- **Accounting** — Chart of Accounts, Journal Entries, and Payment Entries.
+- **HR** — Employees, Attendance, Leave Applications, Salary Slips, Payroll
   Entries, and Expense Claims.
-- **Project** (9) — Projects, Tasks (with native assignment), and Timesheets.
-- **Delivery** (5) — Delivery Notes and Shipments.
-- **Manufacturing** (7) — BOMs, Work Orders, and Job Cards.
-- **CRM** (8) — Leads, Opportunities, Contacts, and Campaigns.
-- **Assets** (8) — Assets, Movements, Maintenance records, and Categories.
-- **Operations** (10) — Generic CRUD, native assignment, and file upload for any
-  DocType (`erpnext_doc_*`, `erpnext_file_upload`).
-- **Kanban** (2) — Read-write boards for Task, Opportunity, and Issue with
+- **Project** — Projects, Tasks (with native assignment), and Timesheets.
+- **Delivery** — Delivery Notes and Shipments.
+- **Manufacturing** — BOMs, Work Orders, and Job Cards.
+- **CRM** — Leads, Opportunities, Contacts, and Campaigns.
+- **Assets** — Assets, Movements, Maintenance records, and Categories.
+- **Operations** — Generic CRUD, native assignment, attachment listing, upload,
+  host-mediated download, and deny-by-default Frappe method calls
+  (`erpnext_doc_*`, `erpnext_file_*`, `erpnext_method_call`).
+- **Kanban** — Read-write boards for Task, Opportunity, and Issue with
   drag-and-drop.
-- **Analytics** (17) — 11 analytics charts (bar, area, treemap, radar, scatter,
-  P&L…), 5 KPIs with sparklines, and a sales funnel.
-- **Setup** (3) — Company creation and assignable user listing.
+- **Analytics** — Charts (bar, area, treemap, radar, scatter, P&L…), KPIs with
+  sparklines, and a sales funnel.
+- **Buy** — Read-only sealed capture of closed commercial documents
+  (`erpnext_buy_capture`) and an immutable recorded-session evidence viewer. Not
+  a purchase, BOM/RFQ/PO, or live ERP qualification.
+- **Setup** — Company creation and assignable user listing.
 
 Full per-tool reference with parameters: [`docs/tools.md`](docs/tools.md).
 
 ## Environment Variables
 
-| Variable                   | Required | Description                                                                                                   |
-| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
-| `ERPNEXT_URL`              | Yes      | ERPNext base URL — self-hosted (e.g. `http://localhost:8000`) or cloud (e.g. `https://mycompany.erpnext.com`) |
-| `ERPNEXT_API_KEY`          | Yes      | API Key from User Settings                                                                                    |
-| `ERPNEXT_API_SECRET`       | Yes      | API Secret from User Settings                                                                                 |
-| `ERPNEXT_MAX_UPLOAD_BYTES` | No       | Maximum decoded file-upload size in bytes (positive integer; default: 10 MiB)                                 |
+| Variable                     | Required | Description                                                                                                                      |
+| ---------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `ERPNEXT_URL`                | Yes      | ERPNext base URL — self-hosted (e.g. `http://localhost:8000`) or cloud (e.g. `https://mycompany.erpnext.com`)                    |
+| `ERPNEXT_API_KEY`            | Yes      | API Key from User Settings                                                                                                       |
+| `ERPNEXT_API_SECRET`         | Yes      | API Secret from User Settings                                                                                                    |
+| `ERPNEXT_MAX_UPLOAD_BYTES`   | No       | Maximum decoded file-upload size in bytes (positive integer; default: 10 MiB)                                                    |
+| `ERPNEXT_MAX_DOWNLOAD_BYTES` | No       | Maximum attachment-download size in bytes (positive integer; default: 10 MiB)                                                    |
+| `ERPNEXT_METHOD_ALLOWLIST`   | No       | Comma-separated exact method paths or `prefix.*`; unset means `erpnext_method_call` denies every method, while `*` allows all    |
+| `MCP_MRTR_SIGNING_KEY`       | No       | Exactly 64 lowercase hex characters; enables signed ambiguous-link elicitation. **Single-instance deployments only** — see below |
+
+MRTR is opt-in. Without this key, or when the client does not advertise
+elicitation, ambiguous links keep returning the existing actionable ambiguity
+error instead of prompting for a selection.
+
+> **Do not run MRTR behind a load balancer with this configuration.** The
+> signing key proves a retry token is authentic; it does not make it single-use.
+> That is the job of a replay store, and the default one is process-local. Share
+> the key across two instances and the same signed retry validates on both —
+> creating the purchase order, leave application or expense claim **twice**,
+> irreversibly once submitted.
+>
+> A multi-instance deployment must pass a shared atomic `mrtr.replayStore` to
+> `McpApp` (Redis satisfies the contract with `SET key 1 NX EXAT`). The
+> framework logs a warning at startup whenever MRTR is enabled without one —
+> that warning is not noise, it is this paragraph.
 
 ## Architecture
 
-```
-server.ts           # MCP server (stdio + HTTP + inspector)
-mod.ts              # Public API
-deno.json           # Package config
-src/
-  api/
-    frappe-client.ts  # Frappe REST HTTP client (zero-dependency)
-    types.ts          # Frappe type definitions
-  kanban/
-    adapters/         # Per-DocType kanban adapters (task, opportunity, issue)
-    definitions.ts    # Board registry
-    types.ts          # Shared kanban contracts
-  tools/
-    sales.ts          # 17 sales tools
-    inventory.ts      # 9 inventory tools
-    purchasing.ts     # 11 purchasing tools
-    accounting.ts     # 6 accounting tools
-    hr.ts             # 12 HR tools
-    project.ts        # 9 project tools
-    delivery.ts       # 5 delivery tools
-    manufacturing.ts  # 7 manufacturing tools
-    crm.ts            # 8 CRM tools
-    assets.ts         # 8 asset tools
-    operations.ts     # 10 generic operations tools
-    setup.ts          # 3 company/setup tools
-    kanban.ts         # 2 read-write kanban tools
-    analytics.ts      # 17 analytics tools (charts, KPIs, funnel)
-    ui-refresh.ts     # Auto-inject _rowAction, _sendMessageHints, _drillDown
-    mod.ts            # Tool registry
-    types.ts          # Tool interface
-  client.ts           # ErpNextToolsClient
-  runtime.ts          # Deno runtime adapter
-  runtime.node.ts     # Node.js runtime adapter
-  *_test.ts           # Tests are colocated with source files
-  ui/
-    shared/           # ActionButton, InfoField, theme, branding, refresh
-    doclist-viewer/   # Generic document list (inline detail, chip filters)
-    invoice-viewer/   # Invoice display (item drill-down, actions)
-    stock-viewer/     # Stock balance (detail panel, sendMessage)
-    chart-viewer/     # Universal chart renderer (12 types, click drill-down)
-    kanban-viewer/    # Read-write kanban (drag, edit, sendMessage)
-    kpi-viewer/       # KPI card (clickable number + sparkline)
-    funnel-viewer/    # Sales funnel (trapezoid stages, click-through)
-    viewers.ts        # Viewer registry
-docs/
-  ROADMAP.md          # Feature roadmap
-  coverage.md         # Test coverage matrix
-```
+Tools are grouped by business domain under `src/tools/`, the Frappe REST client
+is dependency-free, and each UI viewer is a separate build under `src/ui/`. Full
+layout: [repository layout](docs/architecture.md).
 
 ## npm Package
 
 The npm package (`@casys/mcp-erpnext`) is a single self-contained bundle with
 zero runtime dependencies. UI viewers are embedded. Requires Node >= 20.
 
-## Development
-
-```bash
-# Run tests
-deno test --allow-all src/
-
-# Type check
-deno task check
-
-# Start HTTP server (dev)
-deno task serve
-
-# Launch MCP Inspector
-deno task inspect
-
-# Build UI viewers
-deno task ui:build
-
-# Full local release preflight (no publish)
-deno task release:check
-
-# Dev a specific viewer with HMR
-cd src/ui && npm run dev:kanban
-```
-
 ## Contributing
 
 Contributions are welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** to get
 started, and [AGENTS.md](AGENTS.md) for the full architecture and conventions.
 
-## Release Flow
-
-Releases are manual and explicit:
-
-1. Update `deno.json`, `server.ts`, and `CHANGELOG.md`.
-2. Run `deno task release:check` locally.
-3. Commit and push the release commit to `main`.
-4. Create the GitHub release/tag, for example `v2.3.0`.
-5. Run the `Publish` workflow manually to publish the same version to JSR and
-   npm.
-
-The package name stays `@casys/mcp-erpnext`; releases only bump the package
-version.
-
 ## License
 
 MIT
+
+Viewers and Buy result fields use the host locale: English, French, Simplified
+Chinese, Traditional Chinese, Hindi, Bengali, Tamil and Urdu. Chinese script
+tags take precedence over region tags; `zh-TW`, `zh-HK` and `zh-MO` select
+Traditional Chinese when no script is specified. Urdu uses right-to-left
+document direction, and a later host locale change updates the language and
+direction without reloading the viewer. App-level waiting and rejection screens
+retain English labels in this beta; host-context support for those shared
+surface screens remains an upstream MCP View follow-up.

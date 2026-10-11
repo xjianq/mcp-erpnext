@@ -6,16 +6,17 @@ The viewer and tooling layer is mature. This phase turns mcp-erpnext from a
 single-instance stdio/HTTP server into a multi-tenant, ERP-agnostic platform
 reachable through a shared MCP bridge with real identity.
 
-| Item                    | Description                                                                                                                                                                                                                      | Status      |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| **MCP bridge wiring**   | Connect to a Deno Deploy relay (local tunnel → cloud → host) so viewers and KPI feeds can be published and shared outside a single host session, not just spawned per-client over stdio.                                         | In progress |
-| **ERP-agnostic core**   | Extract the Frappe/ERPNext REST client behind an adapter interface so the same tool catalog and viewers can target other ERP backends. ERPNext becomes the first adapter rather than a hard dependency.                          | Next        |
-| **Zitadel auth (OIDC)** | Wire [Zitadel](https://zitadel.com) as the OAuth2/OIDC provider for the HTTP transport: JWT/JWKS validation and per-tool scope enforcement (`erpnext:read` vs `erpnext:write`). Prerequisite for multi-tenant bridge deployment. | Next        |
+| Item                    | Description                                                                                                                                                                                                                    | Status      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| **MCP bridge wiring**   | Connect to a Deno Deploy relay (local tunnel → cloud → host) so viewers and KPI feeds can be published and shared outside a single host session, not just spawned per-client over stdio.                                       | In progress |
+| **ERP-agnostic core**   | Extract the Frappe/ERPNext REST client behind an adapter interface so the same tool catalog and viewers can target other ERP backends. ERPNext becomes the first adapter rather than a hard dependency.                        | Next        |
+| **Zitadel auth (OIDC)** | Generic HTTP Bearer/JWT/JWKS validation and RFC 9728 metadata are wired. Validate the Zitadel deployment profile and add per-tool scope enforcement (`erpnext:read` vs `erpnext:write`) before multi-tenant bridge deployment. | In progress |
 
 ## Interactive Additions (P0)
 
-Core mutations and drill-down navigation are shipped across all seven viewers.
-What remains:
+Core mutations and drill-down navigation are shipped across all eight viewers.
+The generic document surface and attachment list/upload/download workflow ship
+in 3.1.0-beta.2. What remains:
 
 | Interaction                | Viewer                         | Tool Called                            | Description                                                                                            |
 | -------------------------- | ------------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -40,6 +41,12 @@ What remains:
 
 ## Ideas / Nice-to-have (P2)
 
+- Experimental coordination transport for versioned `erpnext.document.changed`
+  facts between independently mounted MCP Apps. Keep ephemeral UI signals
+  separate, bind facts to an ERP authority, prevent loops, and let each
+  subscriber invalidate then perform its own canonical read. Dependency topics
+  stay explicit; do not infer which KPI or aggregate a document mutation
+  affects.
 - Manufacturing dashboard (Work Order status, machine utilization)
 - Multi-currency reconciliation viewer
 - Approval queue viewer (pending approvals across doctypes)
@@ -55,3 +62,54 @@ What remains:
 - [GitHub — AR Aging Issues](https://github.com/frappe/erpnext/issues/45830)
 - [Mint — Better Bank Reconciliation](https://github.com/The-Commit-Company/mint)
 - [ERPNext Procurement Tracker](https://techfordai.com/procurement-tracker-in-erpnext/)
+
+## Ideas not yet scheduled
+
+Moved out of the old `known-issues.md`, which mixed roadmap ideas with bug
+history.
+
+### Setup wizard automation
+
+A fresh ERPNext instance requires master data before being able to create
+transactional documents. The tools `erpnext_company_create` and
+`erpnext_doc_create` now exist, but the full workflow is:
+
+1. Create Company
+2. Create Price Lists (Standard Selling, Standard Buying)
+3. Create Warehouses (or use the ones auto-created by Company)
+4. Create Item Groups if needed
+5. Create UOMs if non-standard (Nos, Kg, etc. exist by default)
+
+**Idea**: A tool `erpnext_setup_check` that checks that the prerequisites exist
+and returns what is missing.
+
+### Retry / error context enrichment
+
+When an operation fails (e.g.: MandatoryError), the handler could:
+
+1. Parse the Frappe error
+2. Return a structured message with the missing field
+3. Suggest the fix (e.g.: "Add selling_price_list field")
+
+### Rate limits / throttling
+
+No rate limiting on the client side. An agent that loops can bombard the ERPNext
+API. `FrappeClient` retries reads on 429/5xx, but does not yet perform global
+throttling or per-session request budgeting.
+
+### Integration tests
+
+Current tests are all mocked. Integration tests running against a real ERPNext
+(Docker) instance would be needed to validate end-to-end workflows. Suggested
+Deno pattern:
+
+```typescript
+const runIntegration = Deno.env.get("ERPNEXT_INTEGRATION") === "1";
+Deno.test({
+  name: "integration: sales order create validates ERPNext defaults",
+  ignore: !runIntegration,
+  fn: async () => {
+    /* requires ERPNEXT_URL, ERPNEXT_API_KEY, ERPNEXT_API_SECRET */
+  },
+});
+```

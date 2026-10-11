@@ -1,13 +1,52 @@
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import { colors, fonts, styles } from "~/shared/theme";
+/** @jsxImportSource preact */
+/**
+ * Panneau de détail de carte kanban — Direction B v2.
+ *
+ * Aucun import de @casys/mcp-view : les primitives viennent de ~/shared/ui.
+ */
+import type { JSX } from "preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import {
+  Button,
+  CONTROL_CLASS,
+  CONTROL_MONO_CLASS,
+  cx,
+  DetailSection,
+  DetailSheet,
+  Field,
+  RANGE_CLASS,
+  SELECT_CLASS,
+  SelectShell,
+  SheetActions,
+  StateMessage,
+} from "~/shared/ui";
 import type { KanbanBoardData, KanbanCardData } from "~/shared/kanban/types";
-import type { CardDetailState } from "~/shared/kanban/state";
-import { badgeToneColors, getAvailableTargets } from "./KanbanViewer";
-import { ActionButton } from "~/shared/ActionButton";
+import {
+  type CardDetailState,
+  rebaseCardEdits,
+  resolveCardDetailCloseIntent,
+} from "~/shared/kanban/state";
+import { ConfirmSheet, useConfirm } from "~/shared/confirm";
+import { getAvailableTargets } from "./KanbanViewer";
+import { LocalActionButton } from "./LocalActionButton";
+import { useT } from "~/shared/i18n-hook";
+import type { TFunction } from "~/shared/i18n-hook";
+import { hintLabel, type NavHint } from "~/shared/jumps";
+import { createSingleFlightGate } from "~/shared/single-flight.ts";
+import {
+  canNavigateToTaskTimesheets,
+  TASK_TIMESHEET_TOO_LARGE_KEY,
+  type TaskTimesheetAvailability,
+  taskTimesheetAvailabilityErrorMessage,
+} from "~/shared/kanban/task-timesheet-availability";
+import { formatInteger } from "~/shared/format";
+import { kanbanBadgeLabel, kanbanStatusLabel } from "~/shared/kanban/labels";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+type LocalizedMessage = string | { key: string };
+
+function localizedMessageText(message: LocalizedMessage, t: TFunction): string {
+  return typeof message === "string" ? message : t(message.key);
+}
 
 const DETAIL_SKIP_FIELDS = new Set([
   "doctype",
@@ -40,39 +79,39 @@ const READONLY_FIELDS = new Set([
 
 const FIELD_LABELS: Record<string, string> = {
   name: "ID",
-  subject: "Subject",
-  status: "Status",
-  priority: "Priority",
-  project: "Project",
-  progress: "Progress (%)",
-  description: "Description",
-  exp_start_date: "Start date",
-  exp_end_date: "Due date",
-  expected_time: "Estimated (h)",
-  actual_time: "Actual time (h)",
-  is_milestone: "Milestone",
-  task_weight: "Weight",
-  total_costing_amount: "Cost",
-  total_billing_amount: "Billing",
-  start: "Start",
-  duration: "Duration",
-  title: "Title",
-  opportunity_from: "Source type",
-  party_name: "Party",
-  opportunity_amount: "Amount",
-  currency: "Currency",
-  probability: "Probability (%)",
-  opportunity_owner: "Owner",
-  expected_closing: "Expected closing",
-  transaction_date: "Created",
-  contact_person: "Contact",
-  source: "Source",
-  customer: "Customer",
-  raised_by: "Raised by",
-  resolution_by: "SLA deadline",
-  opening_date: "Opened",
-  resolution_date: "Resolved",
-  first_responded_on: "First response",
+  subject: "sujet",
+  status: "statut",
+  priority: "priorité",
+  project: "projet",
+  progress: "progression",
+  description: "description",
+  exp_start_date: "date de début",
+  exp_end_date: "date d'échéance",
+  expected_time: "estimé (h)",
+  actual_time: "temps réel (h)",
+  is_milestone: "jalon",
+  task_weight: "poids",
+  total_costing_amount: "coût",
+  total_billing_amount: "facturation",
+  start: "début",
+  duration: "durée",
+  title: "titre",
+  opportunity_from: "type de source",
+  party_name: "partie",
+  opportunity_amount: "montant",
+  currency: "devise",
+  probability: "probabilité (%)",
+  opportunity_owner: "responsable",
+  expected_closing: "clôture prévue",
+  transaction_date: "date de création",
+  contact_person: "contact",
+  source: "source",
+  customer: "client",
+  raised_by: "créé par",
+  resolution_by: "délai SLA",
+  opening_date: "ouverture",
+  resolution_date: "résolution",
+  first_responded_on: "première réponse",
 };
 
 const BOOLEAN_FIELDS = new Set(["is_milestone", "is_group", "is_template"]);
@@ -88,9 +127,18 @@ const DATE_FIELDS = new Set([
   "first_responded_on",
 ]);
 
-const SELECT_OPTIONS: Record<string, string[]> = {
-  priority: ["Low", "Medium", "High", "Urgent"],
-  opportunity_from: ["Lead", "Customer"],
+/* Les valeurs restent les chaînes ERPNext ; seules les étiquettes sont traduites. */
+const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
+  priority: [
+    { value: "Low", label: "Faible" },
+    { value: "Medium", label: "Moyen" },
+    { value: "High", label: "Élevé" },
+    { value: "Urgent", label: "Urgent" },
+  ],
+  opportunity_from: [
+    { value: "Lead", label: "Prospect" },
+    { value: "Customer", label: "Client" },
+  ],
 };
 
 const HEADER_FIELDS = new Set([
@@ -127,7 +175,7 @@ const FIELD_SECTIONS: Array<{ id: string; label: string; fields: string[] }> = [
   {
     id: "time",
     label: "Time Tracking",
-    fields: ["expected_time", "actual_time", "duration"],
+    fields: ["expected_time", "actual_time", "duration", "task_weight"],
   },
   {
     id: "financial",
@@ -138,7 +186,6 @@ const FIELD_SECTIONS: Array<{ id: string; label: string; fields: string[] }> = [
       "probability",
       "total_costing_amount",
       "total_billing_amount",
-      "task_weight",
     ],
   },
   {
@@ -156,17 +203,6 @@ const FIELD_SECTIONS: Array<{ id: string; label: string; fields: string[] }> = [
     ],
   },
 ];
-
-const PRIORITY_TONE: Record<string, string> = {
-  Urgent: "error",
-  High: "error",
-  Medium: "warning",
-  Low: "success",
-};
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 interface ClassifiedField {
   key: string;
@@ -191,13 +227,13 @@ interface ClassifiedFields {
   sections: ClassifiedSection[];
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function fieldLabel(key: string): string {
-  return FIELD_LABELS[key] ??
-    key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+function fieldLabel(key: string, t: TFunction): string {
+  /* Mono minuscule — pas de capitalisation automatique. */
+  const catalogKey = `kanban.field.${key}`;
+  const translated = t(catalogKey);
+  return translated !== catalogKey
+    ? translated
+    : (FIELD_LABELS[key] ?? key.replace(/_/g, " "));
 }
 
 function isDescriptionField(key: string): boolean {
@@ -295,437 +331,192 @@ function classifyFields(detail: Record<string, unknown>): ClassifiedFields {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
+/**
+ * Les sections métier ne sont pas des formulaires indépendants : leurs champs
+ * se comparent. On les place donc sur une grille courte, dont la densité suit
+ * le nombre réel de valeurs plutôt que de réserver des colonnes vides.
+ */
+function sectionGridClass(section: ClassifiedSection): string {
+  if (section.fields.length >= 3) return "sm:grid-cols-3";
+  if (section.fields.length === 2) return "sm:grid-cols-2";
+  return "grid-cols-1";
+}
 
-function InlinePriorityBadge({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const tone = badgeToneColors(PRIORITY_TONE[value]);
+function editedControlClass(base: string, edited: boolean): string {
+  return cx(base, "min-w-0", edited && "!border-accent !bg-accent/10");
+}
 
-  if (editing) {
-    return (
-      <select
-        value={value}
-        onChange={(e) => {
-          onChange(e.target.value);
-          setEditing(false);
-        }}
-        onBlur={() => setEditing(false)}
-        autoFocus
-        style={{
-          ...styles.input,
-          padding: "2px 8px",
-          fontSize: 10,
-          fontWeight: 700,
-          width: "auto",
-          cursor: "pointer",
-        }}
-      >
-        {SELECT_OPTIONS.priority.map((opt) => (
-          <option key={opt} value={opt}>{opt}</option>
-        ))}
-      </select>
-    );
-  }
+/* ── Primitives locales ──────────────────────────────────────────── */
+
+/** Badge chip de métadonnée (identifiant, statut, feedback). */
+function Badge(
+  { children, tone }: {
+    children: preact.ComponentChildren;
+    tone?: string;
+  },
+) {
+  const toneClass = tone === "danger"
+    ? "bg-bad/10 dark:bg-bad/14 text-bad border-bad/20"
+    : tone === "success"
+    ? "bg-ok/10 dark:bg-ok/14 text-ok border-ok/20"
+    : tone === "warning"
+    ? "bg-warn/10 dark:bg-warn/14 text-warn-text border-warn/20"
+    : tone === "info"
+    ? "bg-accent/10 dark:bg-accent/14 text-accent border-accent-edge"
+    : "bg-count border-line text-ink-muted";
 
   return (
     <span
-      role="button"
-      tabIndex={0}
-      onClick={() => setEditing(true)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          setEditing(true);
-        }
-      }}
-      style={{
-        ...styles.badge(tone.color, tone.bg),
-        fontSize: 10,
-        padding: "2px 8px",
-        borderRadius: 3,
-        fontWeight: 700,
-        letterSpacing: "0.03em",
-        textTransform: "uppercase" as const,
-        cursor: "pointer",
-      }}
-      title="Click to change priority"
+      class={cx(
+        "inline-flex items-center gap-1 rounded-badge border px-[7px] py-0.5",
+        "font-mono text-chip",
+        toneClass,
+      )}
     >
-      {value}
+      {children}
     </span>
   );
 }
 
-function ProgressBar({
-  progressValue,
-  editedFields,
-  onFieldChange,
-}: {
-  progressValue: number | null;
-  editedFields: Record<string, string>;
-  onFieldChange: (key: string, value: string) => void;
-}) {
-  if (progressValue === null) return null;
+/* ── Contrôle de champ générique ─────────────────────────────────── */
 
-  const currentProgress = editedFields.progress !== undefined
-    ? Number(editedFields.progress)
-    : (progressValue ?? 0);
-
-  return (
-    <div
-      style={{
-        padding: "6px 16px 8px",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-      }}
-    >
-      <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
-        <span
-          style={{
-            fontSize: 9,
-            fontWeight: 600,
-            color: colors.text.faint,
-            textTransform: "uppercase" as const,
-            letterSpacing: "0.06em",
-            flexShrink: 0,
-          }}
-        >
-          Progress
-        </span>
-        <div
-          style={{
-            flex: 1,
-            position: "relative" as const,
-            height: 18,
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          <div
-            style={{
-              position: "absolute" as const,
-              left: 0,
-              right: 0,
-              height: 4,
-              background: colors.bg.elevated,
-              borderRadius: 2,
-            }}
-          >
-            <div
-              style={{
-                height: "100%",
-                width: `${Math.min(100, Math.max(0, currentProgress))}%`,
-                background: currentProgress >= 100
-                  ? colors.success
-                  : colors.accent,
-                borderRadius: 2,
-                transition: "width 0.2s",
-              }}
-            />
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={currentProgress}
-            onChange={(e) => onFieldChange("progress", e.target.value)}
-            style={{
-              position: "absolute" as const,
-              left: 0,
-              right: 0,
-              width: "100%",
-              height: 18,
-              opacity: 0,
-              cursor: "pointer",
-              margin: 0,
-            }}
-          />
-        </div>
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 700,
-            fontFamily: fonts.mono,
-            color: currentProgress >= 100
-              ? colors.success
-              : colors.text.primary,
-            flexShrink: 0,
-            minWidth: 32,
-            textAlign: "right" as const,
-          }}
-        >
-          {currentProgress}%
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function DetailDescription({
-  field,
-  editedFields,
-  onFieldChange,
-}: {
-  field: ClassifiedField;
-  editedFields: Record<string, string>;
-  onFieldChange: (key: string, value: string) => void;
-}) {
-  const isEdited = field.key in editedFields;
-  const displayValue = isEdited ? editedFields[field.key] : String(field.value);
-
-  return (
-    <div style={{ padding: "8px 16px" }}>
-      <div
-        style={{
-          fontSize: 9,
-          fontWeight: 600,
-          color: colors.text.faint,
-          textTransform: "uppercase" as const,
-          letterSpacing: "0.06em",
-          marginBottom: 4,
-        }}
-      >
-        {fieldLabel(field.key)}
-      </div>
-      <textarea
-        value={displayValue}
-        onChange={(e) => onFieldChange(field.key, e.target.value)}
-        rows={3}
-        style={{
-          ...styles.input,
-          resize: "vertical" as const,
-          borderColor: isEdited ? colors.accent : colors.border,
-          background: isEdited ? colors.accentDim : colors.bg.elevated,
-          lineHeight: 1.5,
-          fontSize: 13,
-        }}
-      />
-    </div>
-  );
-}
-
-function DetailFieldCell({
-  fieldKey,
-  value,
-  editedFields,
-  onFieldChange,
-}: {
-  fieldKey: string;
-  value: unknown;
-  editedFields: Record<string, string>;
-  onFieldChange: (key: string, value: string) => void;
-}) {
+function fieldControl(
+  fieldKey: string,
+  value: unknown,
+  editedFields: Record<string, string>,
+  onFieldChange: (key: string, value: string) => void,
+  t: TFunction,
+  editable: boolean,
+): JSX.Element {
   const isReadonly = READONLY_FIELDS.has(fieldKey);
   const isEdited = fieldKey in editedFields;
   const displayValue = isEdited ? editedFields[fieldKey] : String(value);
   const type = getFieldType(fieldKey, value);
 
-  const inputBase: CSSProperties = {
-    ...styles.input,
-    padding: "5px 8px",
-    fontSize: 13,
-  };
-
-  function inputStyle(edited: boolean): CSSProperties {
-    return {
-      ...inputBase,
-      borderColor: edited ? colors.accent : "transparent",
-      background: edited ? colors.accentDim : "transparent",
-    };
+  if (isReadonly || !editable) {
+    return (
+      <span
+        dir="auto"
+        class={cx(
+          "min-w-0 break-words text-data text-ink-2",
+          type === "textarea" && "whitespace-pre-wrap",
+        )}
+      >
+        {fieldKey === "status" || fieldKey === "workflow_state"
+          ? kanbanStatusLabel(String(value), t)
+          : type === "select"
+          ? kanbanBadgeLabel(String(value), t)
+          : String(value)}
+      </span>
+    );
   }
 
-  function renderControl() {
-    if (isReadonly) {
+  switch (type) {
+    case "boolean": {
+      const checked = isEdited ? displayValue === "1" : value === 1;
       return (
-        <span
-          style={{
-            fontSize: 13,
-            color: colors.text.primary,
-            fontFamily: typeof value === "number" ? fonts.mono : fonts.sans,
-            fontWeight: fieldKey === "name" ? 500 : 400,
+        <button
+          type="button"
+          aria-pressed={checked}
+          class={cx(
+            "rounded-control border px-3 py-[5px] font-mono text-chip transition-colors",
+            checked
+              ? "bg-accent/14 border-accent-edge text-accent"
+              : "bg-control border-line text-ink-muted hover:text-ink",
+          )}
+          onClick={() => {
+            const current = isEdited ? displayValue === "1" : value === 1;
+            onFieldChange(fieldKey, current ? "0" : "1");
           }}
         >
-          {String(value)}
-        </span>
+          {checked ? t("kanban.modal.bool.yes") : t("kanban.modal.bool.no")}
+        </button>
       );
     }
-
-    switch (type) {
-      case "boolean":
-        return (
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={isEdited ? displayValue === "1" : value === 1}
-              onChange={(e) =>
-                onFieldChange(fieldKey, e.target.checked ? "1" : "0")}
-              style={{
-                width: 16,
-                height: 16,
-                accentColor: "var(--accent)",
-                cursor: "pointer",
-              }}
-            />
-            <span style={{ fontSize: 12, color: colors.text.secondary }}>
-              {(isEdited ? displayValue === "1" : value === 1) ? "Yes" : "No"}
-            </span>
-          </label>
-        );
-      case "select":
-        return (
+    case "select":
+      return (
+        <SelectShell>
           <select
+            class={editedControlClass(SELECT_CLASS, isEdited)}
             value={displayValue}
-            onChange={(e) => onFieldChange(fieldKey, e.target.value)}
-            style={{
-              ...inputBase,
-              borderColor: isEdited ? colors.accent : "transparent",
-              background: isEdited ? colors.accentDim : "transparent",
-              cursor: "pointer",
-            }}
+            onChange={(e) =>
+              onFieldChange(
+                fieldKey,
+                (e.currentTarget as HTMLSelectElement).value,
+              )}
           >
             {SELECT_OPTIONS[fieldKey]?.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
+              <option key={opt.value} value={opt.value}>
+                {t(`kanban.select.${fieldKey}.${opt.value}`)}
+              </option>
             ))}
           </select>
-        );
-      case "date":
-        return (
-          <input
-            type="date"
-            value={displayValue}
-            onChange={(e) => onFieldChange(fieldKey, e.target.value)}
-            style={inputStyle(isEdited)}
-          />
-        );
-      case "number":
-        return (
-          <input
-            type="number"
-            value={displayValue}
-            onChange={(e) => onFieldChange(fieldKey, e.target.value)}
-            style={{ ...inputStyle(isEdited), fontFamily: fonts.mono }}
-          />
-        );
-      default:
-        return (
-          <input
-            type="text"
-            value={displayValue}
-            onChange={(e) => onFieldChange(fieldKey, e.target.value)}
-            style={inputStyle(isEdited)}
-          />
-        );
-    }
+        </SelectShell>
+      );
+    case "date":
+      return (
+        <input
+          dir="auto"
+          class={editedControlClass(CONTROL_MONO_CLASS, isEdited)}
+          type="date"
+          value={displayValue}
+          onInput={(e) =>
+            onFieldChange(
+              fieldKey,
+              (e.currentTarget as HTMLInputElement).value,
+            )}
+        />
+      );
+    case "number":
+      return (
+        <input
+          dir="auto"
+          class={editedControlClass(CONTROL_MONO_CLASS, isEdited)}
+          type="number"
+          value={displayValue}
+          onInput={(e) =>
+            onFieldChange(
+              fieldKey,
+              (e.currentTarget as HTMLInputElement).value,
+            )}
+        />
+      );
+    case "textarea":
+      return (
+        <textarea
+          dir="auto"
+          aria-label={fieldLabel(fieldKey, t)}
+          class={cx(editedControlClass(CONTROL_CLASS, isEdited), "resize-y")}
+          rows={3}
+          value={displayValue}
+          onInput={(e) =>
+            onFieldChange(
+              fieldKey,
+              (e.currentTarget as HTMLTextAreaElement).value,
+            )}
+        />
+      );
+    default:
+      return (
+        <input
+          dir="auto"
+          class={editedControlClass(CONTROL_CLASS, isEdited)}
+          type="text"
+          value={displayValue}
+          onInput={(e) =>
+            onFieldChange(
+              fieldKey,
+              (e.currentTarget as HTMLInputElement).value,
+            )}
+        />
+      );
   }
-
-  return (
-    <div
-      className="detail-field-cell"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 1,
-        padding: "3px 4px",
-      }}
-    >
-      <span
-        style={{
-          fontSize: 10,
-          fontWeight: 600,
-          color: isEdited ? colors.accent : colors.text.faint,
-          textTransform: "uppercase" as const,
-          letterSpacing: "0.05em",
-        }}
-      >
-        {fieldLabel(fieldKey)}
-      </span>
-      {renderControl()}
-    </div>
-  );
 }
 
-function DetailMetadataGrid({
-  sections,
-  editedFields,
-  onFieldChange,
-}: {
-  sections: ClassifiedSection[];
-  editedFields: Record<string, string>;
-  onFieldChange: (key: string, value: string) => void;
-}) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      {sections.map((section) => (
-        <div key={section.id} style={{ padding: "2px 16px 0" }}>
-          <div
-            style={{
-              fontSize: 9,
-              fontWeight: 700,
-              color: colors.text.faint,
-              textTransform: "uppercase" as const,
-              letterSpacing: "0.08em",
-              padding: "4px 0 2px",
-              borderBottom: `1px solid ${colors.borderSubtle}`,
-            }}
-          >
-            {section.label}
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: section.fields.length >= 3
-                ? "1fr 1fr 1fr"
-                : "1fr 1fr",
-              gap: "0 12px",
-            }}
-          >
-            {section.fields.map((field, idx) => {
-              const cols = section.fields.length >= 3 ? 3 : 2;
-              const isLast = idx === section.fields.length - 1;
-              const isOdd = section.fields.length % cols === 1;
-              return (
-                <div
-                  key={field.key}
-                  style={isLast && isOdd ? { gridColumn: "1 / -1" } : undefined}
-                >
-                  <DetailFieldCell
-                    fieldKey={field.key}
-                    value={field.value}
-                    editedFields={editedFields}
-                    onFieldChange={onFieldChange}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Assignees section
-// ---------------------------------------------------------------------------
+/* ── Assignés ────────────────────────────────────────────────────── */
 
 export type AssignableUser = { name: string; full_name?: string };
 
-/** Parse Frappe's `_assign` meta field (JSON-encoded array of user emails). */
 function parseAssignees(value: unknown): string[] {
   if (typeof value !== "string" || !value) return [];
   try {
@@ -734,7 +525,6 @@ function parseAssignees(value: unknown): string[] {
       ? parsed.filter((entry): entry is string => typeof entry === "string")
       : [];
   } catch (error) {
-    // Malformed _assign must not break the modal — treat as unassigned.
     console.warn("[parseAssignees] Could not parse _assign:", error, value);
     return [];
   }
@@ -747,20 +537,23 @@ function AssigneesSection({
   onLoadUsers,
 }: {
   assignees: string[];
-  onAssign: (assignTo: string) => Promise<void>;
+  onAssign?: (assignTo: string) => Promise<void>;
   onUnassign?: (assignee: string) => Promise<void>;
-  onLoadUsers: () => Promise<AssignableUser[]>;
+  onLoadUsers?: () => Promise<AssignableUser[]>;
 }) {
+  const t = useT();
   const [users, setUsers] = useState<AssignableUser[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<LocalizedMessage | null>(null);
   const [selected, setSelected] = useState("");
   const [assigning, setAssigning] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assignError, setAssignError] = useState<LocalizedMessage | null>(null);
 
-  // Mount-only: the assignable-user list is card-independent, and onLoadUsers
-  // gets a fresh identity on every parent render (board auto-refresh).
   useEffect(() => {
+    if (!onLoadUsers) {
+      setUsers([]);
+      return;
+    }
     let cancelled = false;
     onLoadUsers()
       .then((loaded) => {
@@ -769,14 +562,15 @@ function AssigneesSection({
       .catch((error) => {
         if (!cancelled) {
           setLoadError(
-            error instanceof Error ? error.message : "Failed to load users",
+            error instanceof Error
+              ? error.message
+              : { key: "kanban.assignees.error.load_users" },
           );
         }
       });
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const options = (users ?? []).filter(
@@ -784,7 +578,7 @@ function AssigneesSection({
   );
 
   async function handleAssign() {
-    if (!selected || assigning) return;
+    if (!onAssign || !selected || assigning) return;
     setAssigning(true);
     setAssignError(null);
     try {
@@ -792,7 +586,9 @@ function AssigneesSection({
       setSelected("");
     } catch (error) {
       setAssignError(
-        error instanceof Error ? error.message : "Assignment failed",
+        error instanceof Error
+          ? error.message
+          : { key: "kanban.assignees.error.assign" },
       );
     } finally {
       setAssigning(false);
@@ -807,7 +603,9 @@ function AssigneesSection({
       await onUnassign(assignee);
     } catch (error) {
       setAssignError(
-        error instanceof Error ? error.message : "Unassignment failed",
+        error instanceof Error
+          ? error.message
+          : { key: "kanban.assignees.error.unassign" },
       );
     } finally {
       setRemoving(null);
@@ -815,132 +613,90 @@ function AssigneesSection({
   }
 
   return (
-    <div
-      style={{
-        padding: "8px 16px 10px",
-        borderBottom: `1px solid ${colors.borderSubtle}`,
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-      }}
-    >
+    <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
+      <span class="shrink-0 font-mono text-chip text-ink-faint">
+        {t("kanban.modal.section.assignees")}
+      </span>
       <div
-        style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: colors.text.faint,
-          textTransform: "uppercase" as const,
-          letterSpacing: "0.08em",
-        }}
-      >
-        Assigned to
-      </div>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 6,
-          alignItems: "center",
-        }}
+        class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+        role="group"
+        aria-label={t("kanban.modal.section.assignees")}
       >
         {assignees.length === 0 && (
-          <span style={{ fontSize: 11, color: colors.text.faint }}>
-            Unassigned
+          <span class="text-data text-ink-muted italic">
+            {t("common.no_assignee")}
           </span>
         )}
         {assignees.map((email) => (
-          <span
-            key={email}
-            style={{
-              ...styles.badge(colors.accent, colors.accentDim),
-              fontSize: 10,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-          >
-            {email}
+          <Badge key={email} tone="info">
+            <span dir="auto" class="min-w-0 break-all" title={email}>
+              {email}
+            </span>
             {onUnassign && (
               <button
                 type="button"
-                aria-label={`Unassign ${email}`}
-                title={`Unassign ${email}`}
-                onClick={() => handleUnassign(email)}
+                aria-label={t("kanban.assignees.remove_aria", { email })}
+                title={t("kanban.assignees.remove_aria", { email })}
                 disabled={removing !== null}
-                style={{
-                  background: "transparent",
-                  border: 0,
-                  color: "inherit",
-                  cursor: "pointer",
-                  padding: 0,
-                  fontSize: 12,
-                  lineHeight: 1,
-                  opacity: removing === email ? 0.5 : 0.7,
-                }}
+                class="ms-1 text-chip text-accent hover:text-bad transition-colors disabled:opacity-50"
+                onClick={() => void handleUnassign(email)}
               >
                 {removing === email ? "…" : "×"}
               </button>
             )}
-          </span>
+          </Badge>
         ))}
-        <select
-          aria-label="Assign to user"
-          value={selected}
-          onChange={(e) => setSelected(e.target.value)}
-          disabled={assigning || (users === null && !loadError)}
-          style={{
-            ...styles.input,
-            padding: "3px 8px",
-            fontSize: 11,
-            width: "auto",
-            maxWidth: 220,
-            cursor: "pointer",
-          }}
-        >
-          <option value="">
-            {users === null
-              ? (loadError ? "Users unavailable" : "Loading users…")
-              : "Assign to…"}
-          </option>
-          {options.map((user) => (
-            <option key={user.name} value={user.name}>
-              {user.full_name ? `${user.full_name} (${user.name})` : user.name}
-            </option>
-          ))}
-        </select>
-        {selected && (
-          <button
-            type="button"
-            onClick={handleAssign}
-            disabled={assigning}
-            style={{
-              ...styles.button,
-              padding: "3px 12px",
-              fontSize: 11,
-              fontWeight: 600,
-              background: colors.accent,
-              color: "#fff",
-              borderColor: colors.accent,
-              opacity: assigning ? 0.6 : 1,
-              borderRadius: 5,
-            }}
-          >
-            {assigning ? "Assigning…" : "Assign"}
-          </button>
-        )}
       </div>
-      {(assignError ?? loadError) && (
-        <div style={{ fontSize: 10, color: colors.error }}>
-          {assignError ?? loadError}
+      {onAssign && onLoadUsers && (
+        <div class="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+          <SelectShell>
+            <select
+              aria-label={t("kanban.assignees.select_label")}
+              class={cx(SELECT_CLASS, "!w-auto min-w-0 max-w-full")}
+              value={selected}
+              onChange={(e) =>
+                setSelected((e.currentTarget as HTMLSelectElement).value)}
+              disabled={assigning || (users === null && !loadError)}
+            >
+              <option value="">
+                {users === null
+                  ? (loadError
+                    ? t("kanban.assignees.placeholder_error")
+                    : t("common.loading"))
+                  : t("kanban.assignees.placeholder_select")}
+              </option>
+              {options.map((user) => (
+                <option key={user.name} value={user.name}>
+                  {user.full_name
+                    ? `${user.full_name} (${user.name})`
+                    : user.name}
+                </option>
+              ))}
+            </select>
+          </SelectShell>
+          {selected && (
+            <Button
+              disabled={assigning}
+              onClick={() => void handleAssign()}
+            >
+              {assigning
+                ? t("kanban.assignees.assigning")
+                : t("kanban.assignees.assign_btn")}
+            </Button>
+          )}
         </div>
+      )}
+      {(assignError ?? loadError) && (
+        /* Erreur inline : des données sont déjà affichées — pas de StateMessage tone="bad". */
+        <p class="border-s-2 border-bad ps-2.5 text-chip text-bad">
+          {localizedMessageText((assignError ?? loadError)!, t)}
+        </p>
       )}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main modal component
-// ---------------------------------------------------------------------------
+/* ── CardDetailModal ──────────────────────────────────────────────── */
 
 export function CardDetailModal({
   detail,
@@ -952,6 +708,11 @@ export function CardDetailModal({
   onUnassign,
   onLoadUsers,
   onNavigate,
+  hints,
+  onJump,
+  onViewList,
+  timesheetAvailability = { status: "unavailable" },
+  onRecheckTimesheets,
 }: {
   detail: CardDetailState;
   board: KanbanBoardData;
@@ -973,28 +734,56 @@ export function CardDetailModal({
     assignee: string,
   ) => Promise<void>;
   onLoadUsers?: () => Promise<AssignableUser[]>;
-  onNavigate?: (message: string) => void;
+  onNavigate?: (message: string) => Promise<boolean>;
+  onViewList?: () => void;
+  timesheetAvailability?: TaskTimesheetAvailability;
+  onRecheckTimesheets?: () => void;
+  /**
+   * Hints de navigation du tableau (issus de `_sendMessageHints`).
+   * Présents uniquement quand l'hôte relaie les outils serveur.
+   */
+  hints?: NavHint[];
+  /**
+   * Déclenche un saut de navigation dans la pile — disponible uniquement quand
+   * `hints` est fourni. La popin reste dans l'état du niveau ; le saut empile un niveau plein cadre.
+   */
+  onJump?: (hint: NavHint, cardId: string) => void;
 }) {
+  const t = useT();
+  const discardConfirm = useConfirm();
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
+  const editRevisionRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const saveGenerationRef = useRef(0);
+  const selectedCardIdRef = useRef(detail.selectedCardId);
+  const cardDetailRef = useRef(detail.cardDetail);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<
-    { text: string; isError: boolean } | null
+    { text: LocalizedMessage; isError: boolean } | null
   >(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const [navigatePendingKey, setNavigatePendingKey] = useState<string | null>(
+    null,
+  );
+  const [navigateFailed, setNavigateFailed] = useState(false);
+  const navigateGateRef = useRef(createSingleFlightGate());
+
+  cardDetailRef.current = detail.cardDetail;
+  if (selectedCardIdRef.current !== detail.selectedCardId) {
+    selectedCardIdRef.current = detail.selectedCardId;
+    saveGenerationRef.current += 1;
+  }
 
   useEffect(() => {
-    if (!detail.selectedCardId) return;
-    closeButtonRef.current?.focus();
-    function handleEscape(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
-  }, [detail.selectedCardId, onClose]);
-
-  useEffect(() => {
+    editRevisionRef.current += 1;
+    saveInFlightRef.current = false;
     setEditedFields({});
+    setSaving(false);
     setSaveMessage(null);
+    setNavigatePendingKey(null);
+    setNavigateFailed(false);
+    navigateGateRef.current.reset();
+    discardConfirm.dismiss();
+    return () => navigateGateRef.current.reset();
   }, [detail.selectedCardId]);
 
   if (!detail.selectedCardId) return null;
@@ -1003,12 +792,40 @@ export function CardDetailModal({
   const card = board.cards.find((c) => c.id === detail.selectedCardId);
   const cardTitle = card?.title ?? detail.selectedCardId;
   const availableTargets = card
-    ? getAvailableTargets(board, card.columnId)
+    ? getAvailableTargets(board, card.columnId, t)
     : [];
   const hasEdits = Object.keys(editedFields).length > 0;
+  const canEdit = Boolean(onSave);
+
+  function requestDiscard(
+    onConfirm: () => void,
+    actionLabelKey: string,
+  ) {
+    if (resolveCardDetailCloseIntent(editedFields) === "close") {
+      onConfirm();
+      return;
+    }
+    discardConfirm.request({
+      subject: selectedCardId,
+      title: t("kanban.modal.discard.title"),
+      titleKey: "kanban.modal.discard.title",
+      detail: t("kanban.modal.discard.detail"),
+      detailKey: "kanban.modal.discard.detail",
+      actionLabel: t(actionLabelKey),
+      actionLabelKey,
+      onConfirm,
+    });
+  }
+
+  function requestClose() {
+    requestDiscard(onClose, "kanban.modal.discard.action");
+  }
 
   function handleFieldChange(key: string, value: string) {
+    if (!canEdit) return;
+    editRevisionRef.current += 1;
     setEditedFields((prev) => {
+      if (saveInFlightRef.current) return { ...prev, [key]: value };
       const original = detail.cardDetail
         ? String(detail.cardDetail[key] ?? "")
         : "";
@@ -1023,504 +840,774 @@ export function CardDetailModal({
   }
 
   async function handleSave() {
-    if (!hasEdits || !onSave || !detail.selectedCardId) return;
+    if (
+      !hasEdits || !onSave || !detail.selectedCardId ||
+      saveInFlightRef.current
+    ) return;
+    const submittedCardId = detail.selectedCardId;
+    const originalDetail = detail.cardDetail ?? {};
+    const submittedFields = { ...editedFields };
+    const submittedRevision = editRevisionRef.current;
+    const saveGeneration = ++saveGenerationRef.current;
+    saveInFlightRef.current = true;
     setSaving(true);
     setSaveMessage(null);
     try {
-      await onSave(board.doctype, detail.selectedCardId, editedFields);
-      setSaveMessage({ text: "Saved", isError: false });
-      setEditedFields({});
+      await onSave(board.doctype, submittedCardId, submittedFields);
+      if (
+        saveGeneration !== saveGenerationRef.current ||
+        selectedCardIdRef.current !== submittedCardId
+      ) return;
+      const hydratedDetail = cardDetailRef.current;
+      const canonical = hydratedDetail !== originalDetail && hydratedDetail
+        ? hydratedDetail
+        : { ...originalDetail, ...submittedFields };
+      setSaveMessage(
+        editRevisionRef.current === submittedRevision
+          ? { text: { key: "kanban.modal.saved" }, isError: false }
+          : null,
+      );
+      setEditedFields((current) => rebaseCardEdits(current, canonical));
     } catch (error) {
+      if (
+        saveGeneration !== saveGenerationRef.current ||
+        selectedCardIdRef.current !== submittedCardId
+      ) return;
+      setEditedFields((current) => rebaseCardEdits(current, originalDetail));
       setSaveMessage({
-        text: error instanceof Error ? error.message : "Save failed",
+        text: error instanceof Error
+          ? error.message
+          : { key: "kanban.modal.save_error" },
         isError: true,
       });
     } finally {
-      setSaving(false);
+      if (saveGeneration === saveGenerationRef.current) {
+        saveInFlightRef.current = false;
+        setSaving(false);
+      }
     }
   }
 
-  const columnColor = card
-    ? board.columns.find((c) => c.id === card.columnId)?.color
-    : undefined;
+  async function handleNavigate(key: string, message: string) {
+    if (!onNavigate) return;
+    const token = navigateGateRef.current.begin();
+    if (token === null) return;
+    setNavigatePendingKey(key);
+    setNavigateFailed(false);
+    let sent = false;
+    try {
+      sent = await onNavigate(message);
+    } catch {
+      sent = false;
+    }
+    if (!navigateGateRef.current.settle(token)) return;
+    setNavigatePendingKey(null);
+    setNavigateFailed(!sent);
+  }
+
+  if (discardConfirm.pending) {
+    return <ConfirmSheet confirm={discardConfirm} />;
+  }
+
   const classified = detail.cardDetail
     ? classifyFields(detail.cardDetail)
     : null;
 
-  return (
-    <div
-      className="kanban-detail-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        className="kanban-detail-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Detail: ${cardTitle}`}
-      >
-        {/* Color accent bar */}
-        {columnColor && (
-          <div
-            aria-hidden="true"
-            style={{
-              height: 3,
-              background: columnColor,
-              borderRadius: "12px 12px 0 0",
-              flexShrink: 0,
-            }}
-          />
-        )}
+  const milestoneOn = classified
+    ? (editedFields.is_milestone !== undefined
+      ? editedFields.is_milestone === "1"
+      : classified.milestoneValue === 1)
+    : false;
 
-        {/* Header */}
-        <div
-          style={{
-            padding: "10px 16px 8px",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 10,
-            borderBottom: `1px solid ${colors.border}`,
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            {classified?.titleField
-              ? (
-                <input
-                  type="text"
-                  aria-label={fieldLabel(classified.titleField.key)}
-                  value={editedFields[classified.titleField.key] ??
-                    String(classified.titleField.value)}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      classified.titleField!.key,
-                      e.target.value,
-                    )}
-                  style={{
-                    fontSize: 15,
-                    fontWeight: 700,
-                    color: colors.text.primary,
-                    lineHeight: 1.3,
-                    background: "transparent",
-                    border: "1px solid transparent",
-                    borderRadius: 4,
-                    padding: "2px 4px",
-                    margin: "-2px -4px",
-                    width: "calc(100% + 8px)",
-                    fontFamily: fonts.sans,
-                    outline: "none",
-                    transition: "border-color 0.15s",
-                  }}
-                />
-              )
-              : (
-                <div
-                  style={{
-                    fontSize: 15,
-                    fontWeight: 700,
-                    color: colors.text.primary,
-                    lineHeight: 1.3,
-                  }}
-                >
-                  {cardTitle}
-                </div>
-              )}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                marginTop: 2,
-                flexWrap: "wrap",
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: fonts.mono,
-                  fontSize: 11,
-                  color: colors.text.faint,
-                }}
-              >
-                {detail.selectedCardId}
-              </span>
-              {classified?.statusValue && (
-                <span
-                  style={{
-                    ...styles.badge(
-                      columnColor ?? colors.text.muted,
-                      `${columnColor ?? colors.text.muted}20`,
-                    ),
-                    fontSize: 10,
-                  }}
-                >
-                  {classified.statusValue}
-                </span>
-              )}
-              {classified?.priorityValue && (
-                <InlinePriorityBadge
-                  value={editedFields.priority ?? classified.priorityValue}
-                  onChange={(v) => handleFieldChange("priority", v)}
-                />
-              )}
-              {classified?.projectValue && (
-                <span style={{ fontSize: 11, color: colors.text.muted }}>
-                  {classified.projectValue}
-                </span>
-              )}
-              {classified?.milestoneValue !== null &&
-                classified?.milestoneValue !== undefined && (() => {
-                  const cm = editedFields.is_milestone !== undefined
-                    ? editedFields.is_milestone === "1"
-                    : (classified.milestoneValue === 1);
-                  return (
-                    <span
-                      role="switch"
-                      aria-checked={cm}
-                      aria-label="Milestone"
-                      tabIndex={0}
-                      onClick={() =>
-                        handleFieldChange("is_milestone", cm ? "0" : "1")}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          handleFieldChange("is_milestone", cm ? "0" : "1");
-                        }
-                      }}
-                      title={cm
-                        ? "Milestone (click to unset)"
-                        : "Set as milestone"}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 3,
-                        cursor: "pointer",
-                        padding: "1px 6px",
-                        borderRadius: 3,
-                        background: cm ? colors.accentDim : "transparent",
-                        border: `1px solid ${
-                          cm ? colors.accent : "transparent"
-                        }`,
-                        transition: "all 0.2s",
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: 10,
-                          color: cm ? colors.accent : colors.text.faint,
-                          transition: "color 0.2s",
-                          lineHeight: 1,
-                        }}
-                      >
-                        {"\u25C6"}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: 9,
-                          fontWeight: 600,
-                          color: cm ? colors.accent : colors.text.faint,
-                          textTransform: "uppercase" as const,
-                          letterSpacing: "0.04em",
-                          transition: "color 0.2s",
-                        }}
-                      >
-                        Milestone
-                      </span>
-                    </span>
-                  );
-                })()}
-            </div>
-          </div>
-          <button
-            ref={closeButtonRef}
-            type="button"
-            onClick={onClose}
-            aria-label="Close detail"
-            style={{
-              background: "transparent",
-              border: "none",
-              cursor: "pointer",
-              padding: 4,
-              borderRadius: 4,
-              color: colors.text.faint,
-              fontSize: 18,
-              lineHeight: 1,
-              transition: "color 0.1s",
-            }}
+  /* Titre affiché dans l'en-tête : reflète la valeur en cours d'édition. */
+  const titleKey = classified?.titleField?.key;
+  const titleOriginal = classified?.titleField
+    ? String(classified.titleField.value)
+    : cardTitle;
+  const sheetTitle = titleKey && editedFields[titleKey] !== undefined
+    ? editedFields[titleKey]
+    : titleOriginal;
+
+  /* Progression actuelle (editée ou originale). */
+  const currentProgress = classified?.progressValue !== null
+    ? (editedFields.progress !== undefined
+      ? Number(editedFields.progress)
+      : (classified?.progressValue ?? 0))
+    : 0;
+
+  /*
+   * Pied de modale en deux rangées SheetActions :
+   * - Rangée 1 : Enregistrer / Annuler / badge feedback (action qui engage le document)
+   * - Rangée 2 : Déplacer vers + boutons colonnes + liens de navigation
+   * SheetActions gère le filet via first:border-t-0.
+   */
+  // Quand onJump est fourni (outils relayés) ET que le tableau a des hints,
+  // les boutons de navigation deviennent des sauts dans la pile.
+  // Sinon, on conserve les boutons sendMessage existants (fallback).
+  const hasJumpNav = !!onJump && (hints?.length ?? 0) > 0 &&
+    !!detail.selectedCardId;
+  // Les boutons d'origine restent : un saut s'ajoute, il ne remplace pas
+  // ce qui n'a pas d'équivalent dans les hints du serveur.
+  const hasSendMessageNav = !!onNavigate && !!detail.selectedCardId;
+  // Un bouton d'origine s'efface quand un saut porte la même clé : pas de doublon.
+  const jumpKeys = new Set(
+    (hasJumpNav ? hints! : []).map((hint) => hint.key).filter(Boolean),
+  );
+  const hasSecondaryRow = (!!card && availableTargets.length > 0) ||
+    hasJumpNav || hasSendMessageNav || !!onViewList || board.doctype === "Task";
+  const timesheetHasCount = timesheetAvailability.status === "present";
+  const timesheetCanNavigate = canNavigateToTaskTimesheets(
+    timesheetAvailability,
+  );
+  const timesheetLabel = timesheetAvailability.status === "present"
+    ? t("kanban.timesheets.count", {
+      count: formatInteger(timesheetAvailability.count),
+    })
+    : t("kanban.modal.nav.timesheets");
+  const timesheetStatusLabel = timesheetAvailability.status === "error" &&
+      timesheetAvailability.messageKey === TASK_TIMESHEET_TOO_LARGE_KEY
+    ? taskTimesheetAvailabilityErrorMessage(timesheetAvailability, t)
+    : t(
+      `kanban.timesheets.${
+        timesheetAvailability.status === "empty"
+          ? "empty"
+          : timesheetAvailability.status === "loading"
+          ? "loading"
+          : timesheetAvailability.status === "error"
+          ? "error"
+          : "unavailable"
+      }`,
+    );
+  const timesheetErrorAnnouncement = timesheetAvailability.status === "error"
+    ? taskTimesheetAvailabilityErrorMessage(timesheetAvailability, t)
+    : undefined;
+
+  const footer = (
+    <>
+      {onSave && detail.cardDetail &&
+        (hasEdits || saving || saveMessage?.isError) && (
+        <SheetActions class="!py-2">
+          <Button
+            variant="accent"
+            disabled={!hasEdits || saving}
+            onClick={() => void handleSave()}
           >
-            {"\u2715"}
-          </button>
-        </div>
-
-        {/* Content */}
-        <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
-          {detail.detailLoading && (
-            <div
-              style={{
-                padding: 20,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
+            {saving ? t("kanban.modal.saving") : t("kanban.modal.save")}
+          </Button>
+          {hasEdits && (
+            <Button
+              variant="quiet"
+              disabled={saving}
+              onClick={() => {
+                setEditedFields({});
+                setSaveMessage(null);
               }}
             >
-              {[1, 2, 3, 4, 5, 6].map((i) => (
-                <div
-                  key={i}
-                  style={{ display: "flex", gap: 12, alignItems: "center" }}
-                >
-                  <div
-                    className="skeleton"
-                    style={{ width: 120, height: 14 }}
-                  />
-                  <div className="skeleton" style={{ flex: 1, height: 14 }} />
-                </div>
-              ))}
-            </div>
+              {t("common.cancel")}
+            </Button>
           )}
-
-          {detail.detailError && (
-            <div
-              style={{
-                margin: 16,
-                padding: "10px 14px",
-                background: colors.errorDim,
-                borderRadius: 6,
-                color: colors.error,
-                fontSize: 12,
-              }}
-            >
-              {detail.detailError}
-            </div>
+          {saveMessage && (
+            <Badge tone={saveMessage.isError ? "danger" : "success"}>
+              {localizedMessageText(saveMessage.text, t)}
+            </Badge>
           )}
+        </SheetActions>
+      )}
 
-          {!detail.detailLoading && detail.cardDetail && onAssign &&
-            onLoadUsers && (
-            <AssigneesSection
-              assignees={(() => {
-                const raw = detail.cardDetail._assign;
-                const fromDetail = parseAssignees(raw);
-                if (fromDetail.length) return fromDetail;
-                // An explicit empty _assign ("[]") means truly unassigned —
-                // do not fall back, or a just-removed assignee reappears.
-                if (typeof raw === "string" && raw) return [];
-                // Frappe v16 omits _assign from single-doc GET responses —
-                // fall back to the board card's assignee (list data has it).
-                return card?.assignee ? [card.assignee] : [];
-              })()}
-              onAssign={(assignTo) =>
-                onAssign(board.doctype, selectedCardId, assignTo)}
-              onUnassign={onUnassign
-                ? (assignee) =>
-                  onUnassign(board.doctype, selectedCardId, assignee)
-                : undefined}
-              onLoadUsers={onLoadUsers}
-            />
-          )}
-
-          {classified?.descriptionField && (
-            <div style={{ borderBottom: `1px solid ${colors.borderSubtle}` }}>
-              <DetailDescription
-                field={classified.descriptionField}
-                editedFields={editedFields}
-                onFieldChange={handleFieldChange}
-              />
-            </div>
-          )}
-
-          {classified && classified.sections.length > 0 && (
-            <DetailMetadataGrid
-              sections={classified.sections}
-              editedFields={editedFields}
-              onFieldChange={handleFieldChange}
-            />
-          )}
-
-          {classified && (
-            <ProgressBar
-              progressValue={classified.progressValue}
-              editedFields={editedFields}
-              onFieldChange={handleFieldChange}
-            />
-          )}
-        </div>
-
-        {/* Sticky footer */}
-        <div
-          style={{
-            borderTop: `1px solid ${colors.border}`,
-            padding: "8px 16px",
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 6,
-            alignItems: "center",
-            flexShrink: 0,
-          }}
+      {hasSecondaryRow && (
+        <SheetActions
+          class="!py-2"
+          label={card && availableTargets.length > 0
+            ? t("kanban.modal.move_to")
+            : undefined}
         >
-          {/* Save */}
-          {onSave && detail.cardDetail && (
-            <>
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={!hasEdits || saving}
-                style={{
-                  ...styles.button,
-                  padding: "4px 12px",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  background: hasEdits ? colors.accent : colors.bg.elevated,
-                  color: hasEdits ? "#fff" : colors.text.faint,
-                  borderColor: hasEdits ? colors.accent : colors.border,
-                  opacity: saving ? 0.6 : 1,
-                  borderRadius: 5,
-                }}
-              >
-                {saving ? "Saving\u2026" : "Save"}
-              </button>
-              {hasEdits && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditedFields({});
-                    setSaveMessage(null);
-                  }}
-                  style={{
-                    ...styles.button,
-                    padding: "4px 10px",
-                    fontSize: 11,
-                  }}
-                >
-                  Discard
-                </button>
-              )}
-              {saveMessage && (
-                <span
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 500,
-                    color: saveMessage.isError ? colors.error : colors.success,
-                    padding: "1px 6px",
-                    borderRadius: 3,
-                    background: saveMessage.isError
-                      ? colors.errorDim
-                      : colors.successDim,
-                  }}
-                >
-                  {saveMessage.text}
-                </span>
-              )}
-              <span
-                style={{
-                  width: 1,
-                  height: 14,
-                  background: colors.border,
-                  flexShrink: 0,
-                }}
-              />
-            </>
-          )}
-          {card && availableTargets.length > 0 && (
-            <>
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: colors.text.faint,
-                  textTransform: "uppercase" as const,
-                  letterSpacing: "0.06em",
-                }}
-              >
-                Move to
-              </span>
-              {availableTargets.map((target) => (
-                <button
-                  key={target.columnId}
-                  type="button"
-                  onClick={() => {
+          {card && availableTargets.length > 0 &&
+            availableTargets.map((target) => (
+              <Button
+                key={target.columnId}
+                variant="secondary"
+                onClick={() => {
+                  requestDiscard(() => {
                     onMove(card, target.columnId, target.label);
                     onClose();
-                  }}
-                  style={{
-                    ...styles.button,
-                    padding: "4px 8px",
-                    fontSize: 11,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 4,
-                  }}
-                >
-                  {target.color && (
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        background: target.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                  )}
-                  {target.label}
-                </button>
-              ))}
-            </>
+                  }, "kanban.modal.discard.move_action");
+                }}
+              >
+                {target.color && (
+                  <span
+                    aria-hidden="true"
+                    class="inline-block me-1.5 rounded-full"
+                    style={{
+                      width: 6,
+                      height: 6,
+                      /* Couleur de colonne issue des données — seul cas légitime de style inline pour une couleur. */
+                      background: target.color,
+                    }}
+                  />
+                )}
+                {target.label}
+              </Button>
+            ))}
+          {/* « Aller à » : les sauts, puis les phrases — sur leur propre ligne, distincts du déplacement */}
+          {(hasJumpNav || hasSendMessageNav || onViewList) && (
+            <span class="mt-1 basis-full font-mono text-[10px] uppercase tracking-[0.09em] text-ink-faint">
+              {t("nav.goto")}
+            </span>
           )}
-
-          {onNavigate && card && availableTargets.length > 0 && (
-            <span
-              style={{
-                width: 1,
-                height: 14,
-                background: colors.border,
-                flexShrink: 0,
-              }}
+          {onViewList && (
+            <LocalActionButton
+              label={`${t(`kanban.modal.nav.view_list.${board.doctype}`)} ›`}
+              variant="info"
+              onClick={() =>
+                requestDiscard(
+                  onViewList,
+                  "kanban.modal.discard.continue_action",
+                )}
             />
           )}
-
-          {onNavigate && detail.selectedCardId && (
-            <>
-              <ActionButton
-                label="Open in doclist"
+          {hasJumpNav &&
+            hints!.filter((hint) =>
+              hint.key !== "timesheets" || timesheetCanNavigate
+            ).map((hint) => (
+              <LocalActionButton
+                key={hint.key ?? hint.label}
+                label={`${
+                  hint.key === "timesheets" ? timesheetLabel : hintLabel(hint)
+                } ›`}
                 variant="info"
                 onClick={() =>
-                  onNavigate(
-                    `Show me a list view of ${board.doctype} ${detail.selectedCardId}`,
+                  requestDiscard(
+                    () => onJump!(hint, detail.selectedCardId!),
+                    "kanban.modal.discard.continue_action",
                   )}
               />
-              {board.doctype === "Task" && (
-                <ActionButton
-                  label="Timesheets"
+            ))}
+          {/* Boutons sendMessage — comportement d'origine, sans outils */}
+          {hasSendMessageNav && (
+            <>
+              {!onViewList && (
+                <LocalActionButton
+                  label={t(`kanban.modal.nav.request_list.${board.doctype}`)}
                   variant="info"
+                  disabled={navigatePendingKey !== null}
+                  loading={navigatePendingKey === "view_list"}
                   onClick={() =>
-                    onNavigate(
-                      `Show timesheets for task ${detail.selectedCardId}`,
+                    void handleNavigate(
+                      "view_list",
+                      t("kanban.nav.view_list.message", {
+                        doctype: board.doctype,
+                        id: detail.selectedCardId,
+                      }),
                     )}
                 />
               )}
-              {board.doctype === "Opportunity" && (
-                <ActionButton
-                  label="Quotations"
+              {board.doctype === "Task" && !jumpKeys.has("timesheets") &&
+                (timesheetCanNavigate ||
+                  timesheetAvailability.status === "unavailable") &&
+                (
+                  <LocalActionButton
+                    label={timesheetCanNavigate
+                      ? timesheetLabel
+                      : t("kanban.modal.nav.request_timesheets")}
+                    variant="info"
+                    disabled={navigatePendingKey !== null}
+                    loading={navigatePendingKey === "timesheets"}
+                    onClick={() =>
+                      void handleNavigate(
+                        "timesheets",
+                        t("kanban.nav.timesheets.message", {
+                          id: detail.selectedCardId,
+                        }),
+                      )}
+                  />
+                )}
+              {board.doctype === "Opportunity" && !jumpKeys.has("quotations") &&
+                (
+                  <LocalActionButton
+                    label={t("kanban.modal.nav.quotations")}
+                    variant="info"
+                    disabled={navigatePendingKey !== null}
+                    loading={navigatePendingKey === "quotations"}
+                    onClick={() =>
+                      void handleNavigate(
+                        "quotations",
+                        t("kanban.nav.quotations.message", {
+                          id: detail.selectedCardId,
+                        }),
+                      )}
+                  />
+                )}
+              {board.doctype === "Issue" && !jumpKeys.has("tasks") && (
+                <LocalActionButton
+                  label={t("kanban.modal.nav.related_tasks")}
                   variant="info"
+                  disabled={navigatePendingKey !== null}
+                  loading={navigatePendingKey === "tasks"}
                   onClick={() =>
-                    onNavigate(
-                      `Show quotations linked to opportunity ${detail.selectedCardId}`,
+                    void handleNavigate(
+                      "tasks",
+                      t("kanban.nav.tasks.message", {
+                        id: detail.selectedCardId,
+                      }),
                     )}
                 />
               )}
-              {board.doctype === "Issue" && (
-                <ActionButton
-                  label="Related tasks"
-                  variant="info"
-                  onClick={() =>
-                    onNavigate(
-                      `Show tasks related to issue ${detail.selectedCardId}`,
-                    )}
-                />
+              {(navigatePendingKey !== null || navigateFailed) && (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  class={cx(
+                    "basis-full font-mono text-chip",
+                    navigateFailed ? "text-bad" : "text-ink-faint",
+                  )}
+                >
+                  {t(
+                    navigateFailed ? "message.send_error" : "message.sending",
+                  )}
+                </span>
               )}
             </>
           )}
+          {board.doctype === "Task" && !timesheetHasCount && (
+            <span
+              role="status"
+              aria-live="polite"
+              aria-label={timesheetErrorAnnouncement}
+              class={cx(
+                "font-mono text-chip",
+                timesheetAvailability.status === "error"
+                  ? "text-bad"
+                  : "text-ink-faint",
+              )}
+            >
+              {timesheetStatusLabel}
+              {timesheetAvailability.status === "error" &&
+                onRecheckTimesheets && (
+                <button
+                  type="button"
+                  class="ms-2 underline focus-visible:outline-2 focus-visible:outline-accent"
+                  title={timesheetErrorAnnouncement}
+                  onClick={onRecheckTimesheets}
+                >
+                  {t("common.retry")}
+                </button>
+              )}
+            </span>
+          )}
+          {board.doctype === "Task" && timesheetHasCount &&
+            !jumpKeys.has("timesheets") && !hasSendMessageNav && (
+            <span class="font-mono text-chip text-ink-muted">
+              {timesheetLabel}
+            </span>
+          )}
+        </SheetActions>
+      )}
+    </>
+  );
+
+  const columnColor = card
+    ? board.columns.find((column) => column.id === card.columnId)?.color
+    : undefined;
+  const priority = editedFields.priority ?? classified?.priorityValue;
+  const priorityTone = priority === "Urgent" || priority === "High"
+    ? "text-bad !border-bad/20 !bg-bad/10"
+    : priority === "Medium"
+    ? "text-warn-text !border-warn/20 !bg-warn/10"
+    : priority === "Low"
+    ? "text-ok !border-ok/20 !bg-ok/10"
+    : "text-ink-muted !bg-count";
+  const dates = classified?.sections.find((section) => section.id === "dates");
+  const project = editedFields.project ?? classified?.projectValue;
+  const assignees = (() => {
+    const raw = detail.cardDetail?._assign;
+    const fromDetail = parseAssignees(raw);
+    if (fromDetail.length) return fromDetail;
+    if (typeof raw === "string" && raw) return [];
+    return card?.assignee ? [card.assignee] : [];
+  })();
+  const relatedSections =
+    classified?.sections.filter((section) =>
+      section.id === "time" || section.id === "financial"
+    ) ?? [];
+  const primarySections =
+    classified?.sections.filter((section) =>
+      section.id !== "dates" && section.id !== "time" &&
+      section.id !== "financial"
+    ) ?? [];
+  const hasPrimary = !!classified?.descriptionField ||
+    primarySections.length > 0;
+
+  function renderSection(section: ClassifiedSection, compact = false) {
+    return (
+      <DetailSection
+        dense
+        key={section.id}
+        label={t(`kanban.section.${section.id}`)}
+      >
+        <div
+          class={cx(
+            "grid grid-cols-1 gap-x-3 gap-y-2",
+            compact && section.fields.length >= 2
+              ? "grid-cols-2"
+              : sectionGridClass(section),
+          )}
+        >
+          {section.fields.map((field) => (
+            <Field key={field.key} label={fieldLabel(field.key, t)}>
+              {fieldControl(
+                field.key,
+                field.value,
+                editedFields,
+                handleFieldChange,
+                t,
+                canEdit,
+              )}
+            </Field>
+          ))}
         </div>
-      </div>
-    </div>
+      </DetailSection>
+    );
+  }
+
+  return (
+    <DetailSheet
+      title={sheetTitle}
+      eyebrow={classified ? undefined : selectedCardId}
+      titleContent={classified?.titleField
+        ? (canEdit
+          ? (
+            <input
+              type="text"
+              dir="auto"
+              aria-label={fieldLabel(classified.titleField.key, t)}
+              class={editedControlClass(
+                "w-full min-w-0 rounded-control border border-transparent bg-transparent px-1 py-0.5 font-display text-card-title font-semibold text-ink hover:border-line focus:border-accent focus:outline-none",
+                classified.titleField.key in editedFields,
+              )}
+              value={sheetTitle}
+              onInput={(event) =>
+                handleFieldChange(
+                  classified.titleField!.key,
+                  event.currentTarget.value,
+                )}
+            />
+          )
+          : (
+            <h2
+              dir="auto"
+              class="break-words font-display text-card-title font-semibold text-ink"
+            >
+              {sheetTitle}
+            </h2>
+          ))
+        : undefined}
+      headerMeta={classified && (
+        <div class="mt-1 flex flex-wrap items-center gap-2">
+          <span
+            dir="auto"
+            class="max-w-[9rem] truncate font-mono text-chip text-ink-faint"
+            title={classified.idValue ?? selectedCardId}
+          >
+            {classified.idValue ?? selectedCardId}
+          </span>
+          {classified.statusValue && (
+            <span
+              class="rounded-badge border px-2 py-1 font-mono text-chip"
+              style={columnColor
+                ? { color: columnColor, borderColor: columnColor }
+                : undefined}
+            >
+              {kanbanStatusLabel(classified.statusValue, t)}
+            </span>
+          )}
+          {priority != null && (canEdit
+            ? (
+              <SelectShell>
+                <select
+                  aria-label={t("kanban.field.priority")}
+                  class={cx(
+                    editedControlClass(
+                      SELECT_CLASS,
+                      "priority" in editedFields,
+                    ),
+                    "!w-auto !py-1 font-mono text-chip",
+                    !("priority" in editedFields) && priorityTone,
+                  )}
+                  value={priority}
+                  onChange={(event) =>
+                    handleFieldChange("priority", event.currentTarget.value)}
+                >
+                  {SELECT_OPTIONS.priority.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {t(`kanban.select.priority.${option.value}`)}
+                    </option>
+                  ))}
+                </select>
+              </SelectShell>
+            )
+            : (
+              <Badge
+                tone={priority === "Urgent" || priority === "High"
+                  ? "danger"
+                  : priority === "Medium"
+                  ? "warning"
+                  : priority === "Low"
+                  ? "success"
+                  : undefined}
+              >
+                {kanbanBadgeLabel(priority, t)}
+              </Badge>
+            ))}
+          {classified.milestoneValue !== null && (
+            <button
+              type="button"
+              aria-label={t("kanban.field.is_milestone")}
+              aria-pressed={milestoneOn}
+              title={t(
+                milestoneOn
+                  ? "kanban.modal.milestone.remove_title"
+                  : "kanban.modal.milestone.set_title",
+              )}
+              disabled={!canEdit}
+              class={cx(
+                "rounded-control border px-2 py-1 font-mono text-chip focus-visible:outline-2 focus-visible:outline-accent",
+                milestoneOn
+                  ? "border-accent-edge bg-brand/12 text-brand-text"
+                  : "border-line text-ink-faint",
+                "is_milestone" in editedFields && "!border-accent",
+              )}
+              onClick={() =>
+                handleFieldChange("is_milestone", milestoneOn ? "0" : "1")}
+            >
+              ◆ {t("kanban.field.is_milestone")}
+            </button>
+          )}
+          {project != null && (
+            <label
+              class="inline-flex min-w-0 max-w-full items-center gap-1.5"
+              for="kanban-detail-project"
+            >
+              <span class="shrink-0 font-mono text-chip text-ink-faint">
+                {t("kanban.field.project")}
+              </span>
+              {canEdit
+                ? (
+                  <input
+                    id="kanban-detail-project"
+                    dir="auto"
+                    type="text"
+                    title={project}
+                    size={Math.min(24, Math.max(6, project.length + 1))}
+                    class={editedControlClass(
+                      "min-w-0 max-w-[13rem] rounded-control border border-transparent bg-transparent px-1 py-1 font-mono text-chip text-ink-2 hover:border-line focus:border-accent focus:bg-surface focus:outline-none",
+                      "project" in editedFields,
+                    )}
+                    value={project}
+                    onInput={(event) =>
+                      handleFieldChange("project", event.currentTarget.value)}
+                  />
+                )
+                : (
+                  <span
+                    id="kanban-detail-project"
+                    dir="auto"
+                    class="min-w-0 max-w-[13rem] truncate font-mono text-chip text-ink-2"
+                    title={project}
+                  >
+                    {project}
+                  </span>
+                )}
+              {canEdit && (
+                <svg
+                  aria-hidden="true"
+                  class="size-2.5 shrink-0 text-ink-faint"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                >
+                  <path
+                    d="m10.5 2.5 3 3-7.5 7.5-3.5.5.5-3.5 7.5-7.5Z"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="m8.5 4.5 3 3"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                </svg>
+              )}
+            </label>
+          )}
+          {saveMessage && !saveMessage.isError && !hasEdits && !saving && (
+            <span role="status" aria-live="polite">
+              <Badge tone="success">
+                {localizedMessageText(saveMessage.text, t)}
+              </Badge>
+            </span>
+          )}
+        </div>
+      )}
+      accent={columnColor}
+      dense
+      onClose={requestClose}
+      footer={footer}
+      size="wide"
+    >
+      {detail.detailLoading && (
+        <StateMessage>{t("common.loading")}</StateMessage>
+      )}
+      {detail.detailError && (
+        <StateMessage tone="bad">{detail.detailError}</StateMessage>
+      )}
+      {classified && (
+        <>
+          {/* ── Responsables ── */}
+          <AssigneesSection
+            assignees={assignees}
+            onAssign={onAssign
+              ? (assignTo) => onAssign(board.doctype, selectedCardId, assignTo)
+              : undefined}
+            onUnassign={onUnassign
+              ? (assignee) =>
+                onUnassign(board.doctype, selectedCardId, assignee)
+              : undefined}
+            onLoadUsers={onLoadUsers}
+          />
+
+          {(dates || classified.progressValue !== null) && (
+            <DetailSection dense>
+              <div
+                class={cx(
+                  "grid grid-cols-1 gap-x-3 gap-y-2",
+                  (dates?.fields.length ?? 0) +
+                        (classified.progressValue !== null ? 1 : 0) >= 3
+                    ? "sm:grid-cols-3"
+                    : "sm:grid-cols-2",
+                )}
+              >
+                {dates?.fields.map((field) => (
+                  <Field key={field.key} label={fieldLabel(field.key, t)}>
+                    {fieldControl(
+                      field.key,
+                      field.value,
+                      editedFields,
+                      handleFieldChange,
+                      t,
+                      canEdit,
+                    )}
+                  </Field>
+                ))}
+                {classified.progressValue !== null && (
+                  <Field label={t("kanban.modal.section.progress")}>
+                    <div
+                      class={cx(
+                        "flex min-h-8 items-center gap-2 rounded-control px-1",
+                        "progress" in editedFields && "bg-accent/10",
+                      )}
+                    >
+                      {canEdit && (
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={currentProgress}
+                          class={cx(RANGE_CLASS, "min-w-0 flex-1")}
+                          aria-label={t("common.progress.label")}
+                          onInput={(event) =>
+                            handleFieldChange(
+                              "progress",
+                              event.currentTarget.value,
+                            )}
+                        />
+                      )}
+                      <strong
+                        class={cx(
+                          "shrink-0 font-mono text-data tabular-nums",
+                          currentProgress >= 100 ? "text-ok" : "text-ink",
+                        )}
+                      >
+                        {currentProgress}%
+                      </strong>
+                    </div>
+                  </Field>
+                )}
+              </div>
+            </DetailSection>
+          )}
+          {(hasPrimary || relatedSections.length > 0) && (
+            <div
+              class={cx(
+                "grid min-w-0 grid-cols-1 gap-3 border-t border-line-soft pt-2",
+                hasPrimary && relatedSections.length > 0 &&
+                  "sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]",
+              )}
+            >
+              {hasPrimary && (
+                <div class="flex min-w-0 flex-col gap-2">
+                  {/* ── Description ── */}
+                  {classified.descriptionField && (
+                    <DetailSection
+                      dense
+                      label={fieldLabel(classified.descriptionField.key, t)}
+                    >
+                      {canEdit
+                        ? (
+                          <textarea
+                            dir="auto"
+                            class={cx(
+                              editedControlClass(
+                                CONTROL_CLASS,
+                                classified.descriptionField.key in editedFields,
+                              ),
+                              "resize-y",
+                            )}
+                            value={editedFields[
+                                classified.descriptionField.key
+                              ] !==
+                                undefined
+                              ? editedFields[classified.descriptionField.key]
+                              : String(classified.descriptionField.value)}
+                            rows={3}
+                            onInput={(e) =>
+                              handleFieldChange(
+                                classified.descriptionField!.key,
+                                (e.currentTarget as HTMLTextAreaElement).value,
+                              )}
+                          />
+                        )
+                        : (
+                          <p
+                            dir="auto"
+                            class="m-0 whitespace-pre-wrap text-data text-ink-2"
+                          >
+                            {String(classified.descriptionField.value)}
+                          </p>
+                        )}
+                    </DetailSection>
+                  )}
+
+                  {primarySections.map((section) =>
+                    renderSection(section, true)
+                  )}
+                </div>
+              )}
+              {relatedSections.length > 0 && (
+                <div
+                  class={cx(
+                    "flex min-w-0 flex-col gap-2",
+                    hasPrimary && "sm:border-s sm:border-line-soft sm:ps-4",
+                  )}
+                >
+                  {relatedSections.map((section) =>
+                    renderSection(section, hasPrimary)
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </DetailSheet>
   );
 }

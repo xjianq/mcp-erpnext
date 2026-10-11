@@ -1,242 +1,207 @@
+/** @jsxImportSource preact */
 /**
- * Invoice Viewer — Sales/Purchase Invoice display
+ * Invoice viewer — Direction B v2 avec pile de navigation.
  *
- * Inspired by mcp-einvoice pattern:
- * - Party columns (Customer/Supplier + Company)
- * - Inline dates
- * - Clickable item rows with drill-down panel
- * - Action buttons with loading state tracking
- * - sendMessage navigation with loading feedback
- * - FeedbackBanner for errors/success
+ * Niveau 1 : la facture telle qu'aujourd'hui.
+ * Niveau 2+ : liste des paiements (DoclistBody) ou fiche client/fournisseur
+ * (RecordLevel), selon le saut choisi. Sans serverTools, navigate() envoie une
+ * phrase au chat exactement comme avant.
  *
- * @module lib/erpnext/src/ui/invoice-viewer
+ * Découpage :
+ *  - InvoiceViewer : état, connexion, refresh, actions — sans hooks d'UI.
+ *  - InvoiceContent : rendu, pile de navigation, boutons — data toujours dispo.
  */
-
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { App } from "@modelcontextprotocol/ext-apps";
-import { colors, fonts, formatCurrency, styles } from "~/shared/theme";
-import { ErpNextBrandFooter, ErpNextBrandHeader } from "~/shared/ErpNextBrand";
-import { ActionButton } from "~/shared/ActionButton";
+import { ActiveContextChip } from "~/shared/ActiveContextChip";
+import { canShareActiveContextResource } from "~/shared/active-context";
+import { DetailToggleButton } from "~/shared/DetailToggleButton.tsx";
+import { bindHostContext } from "~/shared/host-context-hook";
+import type { DocumentChangeEvent } from "~/shared/document-events";
+import { AttachmentsSection } from "~/shared/document/AttachmentsSection";
+import { documentCapabilities } from "~/shared/document/capabilities";
+import type {
+  ContextInteractionTarget,
+  DocumentContextController,
+} from "~/shared/document/context-interaction";
+import { contextInteractionProps } from "~/shared/document/context-interaction";
 import {
+  childRowContextItem,
+  documentContextItem,
+} from "~/shared/document/context-items";
+import { documentModelOf } from "~/shared/document/model";
+import { PurchaseInvoiceRoundingNote } from "~/shared/document/PurchaseInvoiceRoundingNote";
+import {
+  formatPurchaseInvoiceAmount,
+  interpretHostPurchaseInvoiceSubmit,
+  purchaseInvoiceConfirmAmount,
+  purchaseInvoiceGrossTotal,
+} from "~/shared/document/purchase-invoice";
+import { useAttachments } from "~/shared/document/useAttachments";
+import {
+  Button,
+  CasysCredit,
+  cx,
+  StateMessage,
+  ViewerShell,
+} from "~/shared/ui";
+import { useViewerLayout, type ViewerLayout } from "~/shared/useViewerLayout";
+import { formatCurrency, formatNumber } from "~/shared/format";
+import {
+  beginUiRefresh,
   canRequestUiRefresh,
+  completeUiRefresh,
+  createUiRefreshSequence,
   extractToolResultText,
+  invalidateUiRefresh,
   normalizeUiRefreshFailureMessage,
   resolveUiRefreshRequest,
   type ToolResultPayload,
   type UiRefreshRequestData,
 } from "~/shared/refresh";
+import { useT } from "~/shared/i18n-hook";
+import { ConfirmSheet, type ConfirmState, useConfirm } from "~/shared/confirm";
+import { useViewerNav } from "~/shared/useViewerNav";
+import { useActiveContext } from "~/shared/useActiveContext";
+import { useClickIntent } from "~/shared/useClickIntent";
+import { viewerRootKey } from "~/shared/nav-stack";
+import { PathBar } from "~/shared/PathBar";
+import { LevelBody } from "~/shared/levels/LevelBody";
+import { canSendTextMessage, sendTextMessage } from "~/shared/host-message";
+import { hasAvailableTool } from "~/shared/viewer-tools";
 import { StatusBadge } from "./components/StatusBadge";
 import { ItemDetailPanel } from "./components/ItemDetailPanel";
-
-// ============================================================================
-// MCP App
-// ============================================================================
+import {
+  INVOICE_ATTACHMENT_FIXTURES,
+  INVOICE_FIXTURE,
+  isFixtureMode,
+} from "./fixture.ts";
+import {
+  canOfferNavigation,
+  invoiceMutationActions,
+  invoiceRootDocumentChange,
+  type InvoiceRootMutation,
+  type InvoiceRootNavigationAction,
+  invoiceRootNavigationActions,
+  nextInvoiceMutationCommitted,
+} from "./nav.ts";
+import {
+  type InvoiceData,
+  type InvoiceDocumentEnvelope,
+  invoiceDocumentEnvelope,
+  type InvoiceItem,
+  type InvoicePayload,
+} from "./types.ts";
 
 const app = new App({ name: "Invoice Viewer", version: "3.0.0" });
 const REFRESH_INTERVAL_MS = 15_000;
 const TOOL_CALL_TIMEOUT_MS = 10_000;
+const CANONICAL_READBACK_DELAY_MS = 1_500;
+const ATTACHMENT_SIDEBAR_MIN_WIDTH = 960;
 
-// ============================================================================
-// Types
-// ============================================================================
+type LineRow = InvoiceItem & { idx: number };
+type InvoiceActiveContext = ReturnType<typeof useActiveContext>;
 
-interface InvoiceItem {
-  item_code: string;
-  item_name?: string;
-  qty: number;
-  rate: number;
-  amount: number;
+/* ─── Props de l'inner component ──────────────────────────────────────────── */
+
+interface InvoiceContentProps {
+  data: InvoiceData;
+  envelope: InvoiceDocumentEnvelope;
+  rootKey: string;
+  activeContext: InvoiceActiveContext;
+  mutationCommitted: boolean;
+  error: string | null;
+  refreshing: boolean;
+  fixture: boolean;
+  confirm: ConfirmState;
+  actionLoading: string | null;
+  actionMessage: string | null;
+  actionIsError: boolean;
+  rootFreshEvent: number;
+  rootMutationEvent: number;
+  callAction: (
+    mutation: InvoiceRootMutation,
+    toolName: string,
+    args: Record<string, unknown>,
+    successMsg: string,
+    target: { doctype: string; name: string },
+    onDocumentChanged: (event: DocumentChangeEvent) => void,
+  ) => Promise<void>;
+  onBeginCanonicalReadback: () => void;
+  onCanonicalRefresh: () => Promise<boolean>;
+  onNavigate: (key: string, message: string) => Promise<boolean>;
+  setError: (msg: string | null) => void;
 }
 
-interface InvoiceData {
-  name: string;
-  customer?: string;
-  customer_name?: string;
-  supplier?: string;
-  supplier_name?: string;
-  company?: string;
-  posting_date: string;
-  due_date?: string;
-  status: string;
-  docstatus?: number;
-  grand_total: number;
-  net_total?: number;
-  total_taxes_and_charges?: number;
-  outstanding_amount?: number;
-  currency?: string;
-  items?: InvoiceItem[];
-  contact_email?: string;
-  address_display?: string;
-}
-
-interface InvoicePayload {
-  data?: InvoiceData;
-  refreshRequest?: UiRefreshRequestData;
-  [key: string]: unknown;
-}
-
-// ============================================================================
-// Sub-components
-// ============================================================================
-
-function LoadingSkeleton() {
-  return (
-    <div style={{ padding: 24 }}>
-      {[1, 2, 3, 4, 5].map((i) => (
-        <div
-          key={i}
-          className="skeleton"
-          style={{
-            height: i === 1 ? 32 : 20,
-            width: `${40 + i * 10}%`,
-            marginBottom: 8,
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function InvoiceEmptyState() {
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "48px 24px",
-        color: colors.text.muted,
-        gap: 12,
-        flex: 1,
-      }}
-    >
-      <svg
-        width="56"
-        height="56"
-        viewBox="0 0 56 56"
-        fill="none"
-        style={{ opacity: 0.35 }}
-      >
-        <rect
-          x="12"
-          y="6"
-          width="32"
-          height="44"
-          rx="3"
-          stroke="currentColor"
-          strokeWidth="2"
-        />
-        <path
-          d="M20 16h16M20 22h12M20 28h14M20 34h8"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          opacity="0.6"
-        />
-      </svg>
-      <div style={{ fontSize: 13 }}>No invoice data</div>
-    </div>
-  );
-}
-
-function FeedbackBanner(
-  { type, message, onDismiss }: {
-    type: "error" | "success";
-    message: string;
-    onDismiss?: () => void;
-  },
-) {
-  const isError = type === "error";
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "8px 12px",
-        marginBottom: 12,
-        borderRadius: 8,
-        fontSize: 12,
-        background: isError ? colors.errorDim : colors.successDim,
-        color: isError ? colors.error : colors.success,
-        border: `1px solid ${
-          isError ? colors.error + "30" : colors.success + "30"
-        }`,
-      }}
-    >
-      <span>{message}</span>
-      {onDismiss && (
-        <button
-          onClick={onDismiss}
-          style={{
-            background: "none",
-            border: "none",
-            color: "inherit",
-            cursor: "pointer",
-            fontSize: 14,
-            padding: "0 4px",
-          }}
-        >
-          ✕
-        </button>
-      )}
-    </div>
-  );
-}
-
-function TotalRow(
-  { label, value, bold }: { label: string; value: string; bold?: boolean },
-) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        padding: "4px 0",
-        fontSize: bold ? 14 : 13,
-      }}
-    >
-      <span style={{ color: colors.text.secondary }}>{label}</span>
-      <span
-        style={{
-          fontFamily: fonts.mono,
-          fontWeight: bold ? 700 : 400,
-          color: bold ? colors.accent : colors.text.primary,
-        }}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
-// ============================================================================
-// Main Component
-// ============================================================================
+/* ══════════════════════════════════════════════════════════════════════════════
+   InvoiceViewer — état, connexion, refresh, actions
+══════════════════════════════════════════════════════════════════════════════ */
 
 export function InvoiceViewer() {
-  const [data, setData] = useState<InvoiceData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const t = useT();
+  const fixture = isFixtureMode();
+  const initialEnvelope = fixture
+    ? invoiceDocumentEnvelope(INVOICE_FIXTURE)
+    : null;
+
+  /* ── État ─────────────────────────────────────────────────────────────── */
+
+  const [envelope, setEnvelope] = useState<InvoiceDocumentEnvelope | null>(
+    initialEnvelope,
+  );
+  const [loading, setLoading] = useState(!fixture);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-  const dataRef = useRef<InvoiceData | null>(null);
-  const refreshRequestRef = useRef<UiRefreshRequestData | null>(null);
-  const refreshInFlightRef = useRef(false);
-  const lastRefreshStartedAtRef = useRef(0);
+  const [actionIsError, setActionIsError] = useState(false);
+  const [mutationCommitted, setMutationCommitted] = useState(false);
+  const [rootFreshEvent, setRootFreshEvent] = useState(0);
+  const [rootMutationEvent, setRootMutationEvent] = useState(0);
+  const confirm = useConfirm();
 
-  function hydrateData(nextData: InvoiceData) {
-    dataRef.current = nextData;
-    setData(nextData);
+  /* ── Refs ─────────────────────────────────────────────────────────────── */
+
+  const loadingRef = useRef<HTMLDivElement>(null);
+  const envelopeRef = useRef<InvoiceDocumentEnvelope | null>(initialEnvelope);
+  const refreshRequestRef = useRef<UiRefreshRequestData | null>(
+    initialEnvelope?.refreshRequest ?? null,
+  );
+  const refreshSequenceRef = useRef(createUiRefreshSequence());
+  const refreshPromiseRef = useRef<Promise<boolean> | null>(null);
+  const lastRefreshStartedAtRef = useRef(0);
+  const availableToolsRef = useRef<readonly string[] | undefined>(
+    initialEnvelope?.availableTools,
+  );
+  const actionInFlightRef = useRef(false);
+  const mutationCommittedRef = useRef(false);
+  const canonicalRefreshBlockedRef = useRef(false);
+  const rootEventRef = useRef(0);
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /* ── Hydratation ──────────────────────────────────────────────────────── */
+
+  function hydrateData(nextEnvelope: InvoiceDocumentEnvelope) {
+    envelopeRef.current = nextEnvelope;
+    setEnvelope(nextEnvelope);
+    canonicalRefreshBlockedRef.current = false;
+    mutationCommittedRef.current = false;
+    setMutationCommitted((current) =>
+      nextInvoiceMutationCommitted(current, "canonical-hydrated")
+    );
+    setRootFreshEvent(++rootEventRef.current);
   }
 
   function consumeToolResult(result: ToolResultPayload): boolean {
     if (result.isError) {
       const text = extractToolResultText(result);
-      setError(text ?? "Tool returned an error");
+      setError(text ?? t("invoice.error.tool_error"));
       setLoading(false);
       return false;
     }
@@ -244,107 +209,323 @@ export function InvoiceViewer() {
     if (!text) return false;
     try {
       const parsed = JSON.parse(text) as InvoicePayload;
-      refreshRequestRef.current = resolveUiRefreshRequest(
+      const parsedEnvelope = invoiceDocumentEnvelope(parsed);
+      if (!parsedEnvelope) {
+        throw new Error("Missing explicit document identity");
+      }
+      availableToolsRef.current = parsedEnvelope.availableTools;
+      const refreshRequest = resolveUiRefreshRequest(
         parsed,
         refreshRequestRef.current,
       );
-      hydrateData((parsed.data ?? parsed) as InvoiceData);
+      refreshRequestRef.current = refreshRequest;
+      hydrateData({
+        ...parsedEnvelope,
+        ...(refreshRequest ? { refreshRequest } : {}),
+      });
       setError(null);
       setLoading(false);
       return true;
     } catch {
-      setError("Failed to parse invoice payload");
+      setError(t("invoice.error.parse_failed"));
       setLoading(false);
       return false;
     }
   }
 
-  async function requestRefresh(options: { ignoreInterval?: boolean } = {}) {
-    const request = refreshRequestRef.current;
-    if (
-      !canRequestUiRefresh({
-        request,
-        visibilityState: typeof document === "undefined"
-          ? "visible"
-          : document.visibilityState,
-        refreshInFlight: refreshInFlightRef.current,
-        now: Date.now(),
-        lastRefreshStartedAt: lastRefreshStartedAtRef.current,
-        minIntervalMs: REFRESH_INTERVAL_MS,
-      }, options)
-    ) return;
+  /* ── Refresh ──────────────────────────────────────────────────────────── */
 
-    if (!request || !app.getHostCapabilities()?.serverTools) return;
+  async function requestRefresh(
+    options: { ignoreInterval?: boolean; force?: boolean } = {},
+  ): Promise<boolean> {
+    if (fixture || canonicalRefreshBlockedRef.current) return false;
 
-    refreshInFlightRef.current = true;
-    lastRefreshStartedAtRef.current = Date.now();
-    setRefreshing(true);
+    const current = refreshSequenceRef.current;
+    if (options.force) {
+      if (current.inFlight !== null) {
+        // Invalide immédiatement le read antérieur et coalesce toutes les
+        // mutations derrière son unique drain canonique.
+        refreshSequenceRef.current = beginUiRefresh(current, {
+          force: true,
+        }).state;
+        return refreshPromiseRef.current ?? false;
+      }
 
-    try {
-      const result = await app.callServerTool({
-        name: request.toolName,
-        arguments: request.arguments,
-      }, { timeout: TOOL_CALL_TIMEOUT_MS });
-      if (!result.isError) consumeToolResult(result);
-      else setError("Refresh failed");
-    } catch (cause) {
-      setError(normalizeUiRefreshFailureMessage(cause));
-    } finally {
-      refreshInFlightRef.current = false;
-      setRefreshing(false);
+      // Conserve la relecture obligatoire si elle ne peut pas partir tout de
+      // suite (vue masquée ou capacité momentanément absente).
+      refreshSequenceRef.current = {
+        ...invalidateUiRefresh(current),
+        pendingForced: true,
+      };
+    } else if (current.inFlight !== null) {
+      return false;
     }
+
+    const operation = (async (): Promise<boolean> => {
+      try {
+        while (true) {
+          const sequence = refreshSequenceRef.current;
+          const request = refreshRequestRef.current;
+          const forced = sequence.pendingForced;
+
+          if (
+            !request ||
+            !app.getHostCapabilities()?.serverTools ||
+            !hasAvailableTool(availableToolsRef.current, request.toolName) ||
+            !canRequestUiRefresh({
+              request,
+              visibilityState: typeof document === "undefined"
+                ? "visible"
+                : document.visibilityState,
+              refreshInFlight: false,
+              now: Date.now(),
+              lastRefreshStartedAt: lastRefreshStartedAtRef.current,
+              minIntervalMs: REFRESH_INTERVAL_MS,
+            }, { ignoreInterval: options.ignoreInterval || forced })
+          ) return false;
+
+          const started = beginUiRefresh(sequence, { force: forced });
+          if (started.generation === null) return false;
+          refreshSequenceRef.current = started.state;
+          lastRefreshStartedAtRef.current = Date.now();
+          setRefreshing(true);
+
+          let result: ToolResultPayload | null = null;
+          let failure: { cause: unknown } | null = null;
+          try {
+            result = await app.callServerTool({
+              name: request.toolName,
+              arguments: request.arguments,
+            }, { timeout: TOOL_CALL_TIMEOUT_MS });
+          } catch (cause) {
+            failure = { cause };
+          }
+
+          const completed = completeUiRefresh(
+            refreshSequenceRef.current,
+            started.generation,
+          );
+          refreshSequenceRef.current = completed.state;
+          let succeeded = false;
+          if (completed.accept) {
+            if (failure) {
+              setError(normalizeUiRefreshFailureMessage(failure.cause));
+            } else if (result?.isError) {
+              setError(t("invoice.error.refresh_failed"));
+            } else if (result) {
+              succeeded = consumeToolResult(result);
+            }
+          }
+
+          if (!completed.runPending) return succeeded;
+          // La boucle revalide requête, visibilité et capacité. Tant qu'elle
+          // ne peut pas repartir, pendingForced reste posé pour le focus futur.
+        }
+      } finally {
+        setRefreshing(false);
+      }
+    })();
+    refreshPromiseRef.current = operation;
+    void operation.finally(() => {
+      if (refreshPromiseRef.current === operation) {
+        refreshPromiseRef.current = null;
+      }
+    });
+    return operation;
+  }
+
+  /* ── Actions ──────────────────────────────────────────────────────────── */
+
+  function invalidateRefresh() {
+    refreshSequenceRef.current = invalidateUiRefresh(
+      refreshSequenceRef.current,
+    );
+  }
+
+  function beginCanonicalReadback() {
+    canonicalRefreshBlockedRef.current = true;
+    invalidateRefresh();
+    setRootMutationEvent(++rootEventRef.current);
+  }
+
+  function requestCanonicalRefresh(): Promise<boolean> {
+    canonicalRefreshBlockedRef.current = false;
+    return requestRefresh({ ignoreInterval: true, force: true });
   }
 
   async function callAction(
-    key: string,
+    mutation: InvoiceRootMutation,
     toolName: string,
     args: Record<string, unknown>,
     successMsg: string,
+    target: { doctype: string; name: string },
+    onDocumentChanged: (event: DocumentChangeEvent) => void,
   ) {
-    if (!app.getHostCapabilities()?.serverTools) return;
-    setActionLoading(key);
+    if (
+      fixture ||
+      actionInFlightRef.current ||
+      mutationCommittedRef.current ||
+      !mountedRef.current ||
+      !app.getHostCapabilities()?.serverTools ||
+      !hasAvailableTool(availableToolsRef.current, toolName)
+    ) return;
+    actionInFlightRef.current = true;
+    setActionLoading(mutation);
     setActionMessage(null);
+    setActionIsError(false);
+    const targetIsCurrent = () => {
+      const current = envelopeRef.current;
+      return mountedRef.current && current?.doctype === target.doctype &&
+        current.name === target.name;
+    };
     try {
-      const result = await app.callServerTool({
-        name: toolName,
-        arguments: args,
-      }, { timeout: TOOL_CALL_TIMEOUT_MS });
+      let result: ToolResultPayload;
+      try {
+        result = await app.callServerTool({
+          name: toolName,
+          arguments: args,
+        }, { timeout: TOOL_CALL_TIMEOUT_MS });
+      } catch (cause) {
+        const decision = interpretHostPurchaseInvoiceSubmit(toolName, args, {
+          transportFailure: cause,
+        });
+        if (decision.applies && decision.reread) {
+          if (!targetIsCurrent()) return;
+          mutationCommittedRef.current = true;
+          setMutationCommitted(true);
+          setActionIsError(true);
+          setActionMessage(t("document.purchase_invoice.submit.transport"));
+          beginCanonicalReadback();
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, CANONICAL_READBACK_DELAY_MS)
+          );
+          if (!targetIsCurrent()) return;
+          await requestCanonicalRefresh();
+          return;
+        }
+        throw cause;
+      }
+      if (!targetIsCurrent()) return;
+      const decision = interpretHostPurchaseInvoiceSubmit(toolName, args, {
+        result,
+      });
+      if (decision.applies) {
+        if (decision.kind === "error") {
+          const text = extractToolResultText(result);
+          setActionIsError(true);
+          setActionMessage(text ?? t("invoice.error.action_failed"));
+          return;
+        }
+        if (decision.reread) {
+          // Keep the local lock even when the submit outcome is uncertain.
+          mutationCommittedRef.current = true;
+          setMutationCommitted((current) =>
+            nextInvoiceMutationCommitted(current, "mutation-committed")
+          );
+        }
+        if (decision.emitCommittedEvent) {
+          onDocumentChanged(invoiceRootDocumentChange(
+            target.doctype,
+            target.name,
+            mutation,
+            new Date().toISOString(),
+          ));
+        }
+        if (decision.reread) beginCanonicalReadback();
+        setActionIsError(!decision.claimSubmitted);
+        setActionMessage(
+          decision.claimSubmitted
+            ? successMsg
+            : t("document.purchase_invoice.submit.unconfirmed"),
+        );
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, CANONICAL_READBACK_DELAY_MS)
+        );
+        if (!targetIsCurrent()) return;
+        const refreshed = await requestCanonicalRefresh();
+        if (!targetIsCurrent()) return;
+        if (
+          !refreshed && decision.claimSubmitted && mutationCommittedRef.current
+        ) {
+          setActionIsError(true);
+          setActionMessage(t("invoice.error.refresh_failed"));
+        }
+        return;
+      }
       if (result.isError) {
         const text = extractToolResultText(result);
-        setActionMessage(text ?? "Action failed");
+        setActionIsError(true);
+        setActionMessage(text ?? t("invoice.error.action_failed"));
       } else {
+        mutationCommittedRef.current = true;
+        setMutationCommitted((current) =>
+          nextInvoiceMutationCommitted(current, "mutation-committed")
+        );
+        onDocumentChanged(invoiceRootDocumentChange(
+          target.doctype,
+          target.name,
+          mutation,
+          new Date().toISOString(),
+        ));
+        beginCanonicalReadback();
+        setActionIsError(false);
         setActionMessage(successMsg);
-        setTimeout(() => void requestRefresh({ ignoreInterval: true }), 1500);
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, CANONICAL_READBACK_DELAY_MS)
+        );
+        if (!targetIsCurrent()) return;
+        const refreshed = await requestCanonicalRefresh();
+        if (!targetIsCurrent()) return;
+        if (!refreshed && mutationCommittedRef.current) {
+          setActionIsError(true);
+          setActionMessage(t("invoice.error.refresh_failed"));
+        }
       }
     } catch {
-      setActionMessage("Action failed");
+      if (targetIsCurrent()) {
+        setActionIsError(true);
+        setActionMessage(t("invoice.error.action_failed"));
+      }
     } finally {
-      setActionLoading(null);
+      actionInFlightRef.current = false;
+      if (mountedRef.current) setActionLoading(null);
     }
   }
 
+  /**
+   * Chemin de secours quand l'hôte ne relaie pas les outils :
+   * envoie une phrase au chat — comportement identique à l'original.
+   */
   async function navigate(key: string, message: string) {
+    if (fixture) return false;
     setActionLoading(key);
-    try {
-      await app.sendMessage({
-        role: "user",
-        content: [{ type: "text", text: message }],
-      });
-    } catch {}
+    setActionMessage(null);
+    setActionIsError(false);
+    const sent = await sendTextMessage(app, message);
+    if (!sent) {
+      setActionIsError(true);
+      setActionMessage(t("invoice.error.action_failed"));
+    }
     setActionLoading(null);
+    return sent;
   }
 
+  /* ── Effets ───────────────────────────────────────────────────────────── */
+
   useEffect(() => {
-    app.connect().catch(() => {});
+    if (fixture) return;
     app.ontoolresult = (result: ToolResultPayload) => {
+      invalidateRefresh();
       consumeToolResult(result);
     };
     app.ontoolinputpartial = () => {
-      if (!dataRef.current) setLoading(true);
+      if (!envelopeRef.current) setLoading(true);
     };
-  }, []);
+    app.connect().then(() => bindHostContext(app)).catch(() => {});
+  }, [fixture]);
 
   useEffect(() => {
+    if (fixture) return;
     const onFocus = () => void requestRefresh({ ignoreInterval: true });
     const onVis = () => {
       if (document.visibilityState === "visible") {
@@ -357,464 +538,1076 @@ export function InvoiceViewer() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
+  }, [fixture]);
+
+  /* ── Early returns ────────────────────────────────────────────────────── */
+
+  if (loading || !envelope) {
+    return (
+      <ViewerShell containerRef={loadingRef}>
+        <StateMessage>
+          {loading ? t("invoice.loading") : t("invoice.no_data")}
+        </StateMessage>
+        <ConfirmSheet confirm={confirm} />
+      </ViewerShell>
+    );
+  }
+
+  /* ── Rendu ────────────────────────────────────────────────────────────── */
+
+  const data = envelope.document;
+
+  return (
+    <InvoiceContextBoundary
+      data={data}
+      envelope={envelope}
+      mutationCommitted={mutationCommitted}
+      error={error}
+      refreshing={refreshing}
+      fixture={fixture}
+      confirm={confirm}
+      actionLoading={actionLoading}
+      actionMessage={actionMessage}
+      actionIsError={actionIsError}
+      rootFreshEvent={rootFreshEvent}
+      rootMutationEvent={rootMutationEvent}
+      callAction={callAction}
+      onBeginCanonicalReadback={beginCanonicalReadback}
+      onCanonicalRefresh={requestCanonicalRefresh}
+      onNavigate={navigate}
+      setError={setError}
+    />
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   InvoiceContent — rendu, pile de navigation, boutons
+   Reçoit `data` toujours défini → useNavStack initialisé avec le bon titre.
+   La boundary conserve la file du contexte ; sa fille keyée réinitialise la
+   pile et les gestes à chaque nouvelle pièce.
+══════════════════════════════════════════════════════════════════════════════ */
+
+type InvoiceContextBoundaryProps = Omit<
+  InvoiceContentProps,
+  "rootKey" | "activeContext"
+>;
+
+function InvoiceContextBoundary(props: InvoiceContextBoundaryProps) {
+  const rootKey = viewerRootKey("invoice", undefined, {
+    doctype: props.data.doctype,
+    name: props.data.name,
+  });
+  const activeContext = useActiveContext(app, rootKey);
+  return (
+    <InvoiceContent
+      {...props}
+      key={`${props.data.doctype}:${props.data.name}`}
+      rootKey={rootKey}
+      activeContext={activeContext}
+    />
+  );
+}
+
+function InvoiceContent({
+  data,
+  envelope,
+  rootKey,
+  activeContext,
+  mutationCommitted,
+  error,
+  refreshing,
+  fixture,
+  confirm,
+  actionLoading,
+  actionMessage,
+  actionIsError,
+  rootFreshEvent,
+  rootMutationEvent,
+  callAction,
+  onBeginCanonicalReadback,
+  onCanonicalRefresh,
+  onNavigate,
+  setError,
+}: InvoiceContentProps) {
+  /* ── Hooks d'UI (inconditionnels) ────────────────────────────────────── */
+
+  const { ref, width, layout } = useViewerLayout<HTMLDivElement>();
+  const t = useT();
+
+  // Pile de navigation : titre racine = nom de la pièce.
+  const viewerNav = useViewerNav(app, {
+    title: data.name,
+    kind: "root",
+    origin: "record",
+    key: rootKey,
+  }, { fixture });
+  const clickIntent = useClickIntent();
+  const nav = viewerNav.nav;
+
+  const rootLevelId = nav.stack.levels[0].id;
+  useLayoutEffect(() => {
+    if (rootFreshEvent > rootMutationEvent) nav.clearStale(rootLevelId);
+  }, [rootFreshEvent, rootMutationEvent, rootLevelId]);
+
+  // useDoclist doit être appelé inconditionnellement avant tout return.
+  const { list } = viewerNav;
+
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [canonicalRefreshPending, setCanonicalRefreshPending] = useState(false);
+  const delayedRefreshRef = useRef<number | null>(null);
+  const delayedRefreshGenerationRef = useRef(0);
+  const contentMountedRef = useRef(true);
+  useLayoutEffect(() => {
+    contentMountedRef.current = true;
+    return () => {
+      contentMountedRef.current = false;
+    };
   }, []);
 
-  // Reset expanded item when invoice changes
-  useEffect(() => {
-    setExpandedIdx(null);
-  }, [data?.name]);
+  useEffect(() => () => {
+    delayedRefreshGenerationRef.current += 1;
+    if (delayedRefreshRef.current !== null) {
+      clearTimeout(delayedRefreshRef.current);
+    }
+  }, []);
 
-  if (loading) {
-    return (
-      <div
-        style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}
-      >
-        <ErpNextBrandHeader />
-        <LoadingSkeleton />
-        <ErpNextBrandFooter />
-      </div>
-    );
-  }
-  if (!data) {
-    return (
-      <div
-        style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}
-      >
-        <ErpNextBrandHeader />
-        <InvoiceEmptyState />
-        <ErpNextBrandFooter />
-      </div>
-    );
+  const hostCapabilities = fixture ? undefined : app.getHostCapabilities();
+  const context: DocumentContextController = {
+    supported: !fixture && activeContext.supported,
+    activate: activeContext.activate,
+    activateReversible: activeContext.activateReversible,
+    toggle: activeContext.toggle,
+    toggleReversible: activeContext.toggleReversible,
+    reconcileView: activeContext.reconcileView,
+    reconcileDocument: activeContext.reconcileDocument,
+    isSelected: activeContext.isSelected,
+    canShareResource: (resource) =>
+      canShareActiveContextResource(hostCapabilities, resource),
+  };
+  const availableTools = envelope.availableTools;
+  const hints = envelope.sendMessageHints
+    ? [...envelope.sendMessageHints]
+    : null;
+  const baseDocumentCapabilities = documentCapabilities(
+    hostCapabilities,
+    availableTools,
+    envelope.refreshRequest,
+  );
+  const attachmentCapabilities = {
+    ...baseDocumentCapabilities,
+    canUploadAttachment: baseDocumentCapabilities.canUploadAttachment &&
+      actionLoading === null && !mutationCommitted &&
+      !canonicalRefreshPending,
+  };
+
+  function scheduleCanonicalRefresh(invalidate = true) {
+    if (!contentMountedRef.current) return;
+    if (invalidate) onBeginCanonicalReadback();
+    setCanonicalRefreshPending(true);
+    const generation = ++delayedRefreshGenerationRef.current;
+    if (delayedRefreshRef.current !== null) {
+      clearTimeout(delayedRefreshRef.current);
+    }
+    delayedRefreshRef.current = window.setTimeout(() => {
+      delayedRefreshRef.current = null;
+      if (!contentMountedRef.current) return;
+      const finish = () => {
+        if (!contentMountedRef.current) return false;
+        if (delayedRefreshGenerationRef.current !== generation) return false;
+        setCanonicalRefreshPending(false);
+        return true;
+      };
+      void onCanonicalRefresh().then((refreshed) => {
+        if (finish() && !refreshed) {
+          setError(t("invoice.error.refresh_failed"));
+        }
+      }, () => {
+        if (finish()) setError(t("invoice.error.refresh_failed"));
+      });
+    }, CANONICAL_READBACK_DELAY_MS);
   }
 
-  const ccy = data.currency ?? "USD";
-  const isCustomer = !!data.customer;
-  const doctype = isCustomer ? "Sales Invoice" : "Purchase Invoice";
+  const attachments = useAttachments({
+    app,
+    envelope,
+    capabilities: attachmentCapabilities,
+    fixtureFiles: fixture ? INVOICE_ATTACHMENT_FIXTURES : undefined,
+    onDocumentChanged: (event) => {
+      nav.reportDocumentChange(event);
+      scheduleCanonicalRefresh();
+    },
+  });
+  const attachmentMutationBusy = attachments.state.upload !== "idle" &&
+    attachments.state.upload !== "error";
+
+  /* ── Valeurs dérivées ─────────────────────────────────────────────────── */
+
+  const ccy = data.currency ?? "EUR";
+  const doctype = data.doctype;
   const partyName = data.customer_name ?? data.customer ?? data.supplier_name ??
-    data.supplier ?? "—";
+    data.supplier ?? data.party_name ?? "—";
   const outstanding = data.outstanding_amount ?? 0;
   const isPaid = outstanding <= 0;
   const items = data.items ?? [];
   const netTotal = data.net_total ?? items.reduce((s, i) => s + i.amount, 0);
-  const taxes = data.total_taxes_and_charges ?? (data.grand_total - netTotal);
+  const taxes = data.total_taxes_and_charges ??
+    ((data.grand_total ?? 0) - netTotal);
   const isDraft = data.status === "Draft" || data.docstatus === 0;
   const isSubmitted = data.docstatus === 1;
-  const hasServerTools = app.getHostCapabilities()?.serverTools;
-
-  return (
-    <div
-      style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}
-    >
-      <ErpNextBrandHeader />
-      <div
-        style={{ padding: 16, fontFamily: fonts.sans, flex: 1, maxWidth: 720 }}
+  const piGross = purchaseInvoiceGrossTotal(doctype, data);
+  const submitAmount = purchaseInvoiceConfirmAmount(doctype, data);
+  const roundingPanelId = `invoice-rounding-note-${
+    data.name.replace(/[^A-Za-z0-9_-]/g, "-")
+  }`;
+  const invoiceTotalValue = (amountClass: string) => (
+    <div class="flex min-w-0 items-center justify-end gap-1">
+      <span class={amountClass}>
+        {piGross
+          ? formatPurchaseInvoiceAmount(piGross.amount, piGross.currency)
+          : formatCurrency(data.grand_total, ccy)}
+      </span>
+      {piGross?.showNote && (
+        <PurchaseInvoiceRoundingNote
+          calculatedTotal={piGross.calculatedTotal}
+          roundingAdjustment={piGross.roundingAdjustment}
+          invoiceTotal={piGross.amount}
+          currency={piGross.currency}
+          isDraft={isDraft}
+          panelId={roundingPanelId}
+        />
+      )}
+    </div>
+  );
+  const hasServerTools = Boolean(hostCapabilities?.serverTools);
+  const canInspectItem = hasServerTools && (
+    hasAvailableTool(availableTools, "erpnext_item_get") ||
+    hasAvailableTool(availableTools, "erpnext_stock_balance")
+  );
+  const messagesEnabled = !fixture &&
+    canSendTextMessage(app.getHostCapabilities());
+  const canExpand = canInspectItem || messagesEnabled || fixture;
+  const rows: LineRow[] = items.map((item, idx) => ({ ...item, idx }));
+  const contextDocumentModel = documentModelOf(envelope);
+  const itemContextTable = contextDocumentModel.childTables.find((table) =>
+    table.key === "items"
+  );
+  const contextView = `${doctype} · ${data.name}`;
+  const contextDocumentItem = documentContextItem(
+    contextDocumentModel,
+    contextView,
+  );
+  const rootContextTarget: ContextInteractionTarget | undefined =
+    nav.isRoot && context.supported
+      ? {
+        label: t("context.active.toggle", {
+          label: contextDocumentItem.label,
+        }),
+        selected: context.isSelected(contextDocumentItem),
+        onActivate: async () => {
+          await context.toggle(contextDocumentItem);
+        },
+      }
+      : undefined;
+  const contextCandidates = [
+    contextDocumentItem,
+    ...(itemContextTable
+      ? itemContextTable.rows.flatMap((row, rowIndex) => {
+        const item = childRowContextItem(
+          envelope,
+          itemContextTable,
+          row,
+          rowIndex,
+        );
+        return item ? [item] : [];
+      })
+      : []),
+  ];
+  const reconcileInvoiceDocument = context.supported
+    ? context.reconcileDocument
+    : undefined;
+  useEffect(() => {
+    if (!reconcileInvoiceDocument) return;
+    void reconcileInvoiceDocument(contextDocumentItem.id, contextCandidates);
+  }, [contextView, envelope, reconcileInvoiceDocument]);
+  const lineDetailId = (rowIndex: number) => `invoice-line-${rowIndex}-detail`;
+  const lineInteractionTarget = (
+    row: LineRow,
+    rowIndex: number,
+  ): ContextInteractionTarget | undefined => {
+    const contextRow = itemContextTable?.rows[rowIndex];
+    const item = context.supported && itemContextTable && contextRow
+      ? childRowContextItem(
+        envelope,
+        itemContextTable,
+        contextRow,
+        rowIndex,
+      )
+      : null;
+    if (!item && !canExpand) return undefined;
+    const label = item?.label ?? row.item_code;
+    const selected = item ? context.isSelected(item) : undefined;
+    return {
+      label: canExpand
+        ? t(
+          item
+            ? (expandedIdx === row.idx
+              ? "document.row.close_detail"
+              : "document.row.open_detail")
+            : (expandedIdx === row.idx
+              ? "document.row.close_detail_only"
+              : "document.row.open_detail_only"),
+          { label },
+        )
+        : t("context.active.toggle", { label }),
+      selected,
+      expanded: canExpand ? expandedIdx === row.idx : undefined,
+      detailLabel: label,
+      controls: canExpand ? lineDetailId(rowIndex) : undefined,
+      onActivate: () => {
+        if (!item) return;
+        if (canExpand) return context.toggleReversible(item);
+        void context.toggle(item);
+      },
+      doublePolicy: "local",
+      onDoubleActivate: canExpand
+        ? () => setExpandedIdx(expandedIdx === row.idx ? null : row.idx)
+        : undefined,
+    };
+  };
+  const previewTitle = fixture ? t("invoice.preview.title") : undefined;
+  const isWide = layout === "wide";
+  const isMobile = layout === "mobile";
+  const rootStale = nav.stack.levels[0].stale;
+  const rootStaleIndicator = nav.isRoot && rootStale
+    ? (
+      <span
+        role="status"
+        aria-label={t("nav.stale_values", { at: rootStale.at })}
+        title={t("nav.stale_title")}
+        class="inline-flex items-center gap-1.5 font-mono text-nano text-warn"
       >
-        {/* Title + Status */}
+        <span aria-hidden="true" class="size-[5px] rounded-full bg-warn" />
+        {!isMobile && <span>{t("nav.stale_values", { at: rootStale.at })}
+        </span>}
+      </span>
+    )
+    : null;
+  const activeContextChip = (
+    <ActiveContextChip
+      selections={activeContext.selections}
+      failed={activeContext.failed}
+      pending={activeContext.pending}
+      evictedLabel={activeContext.evictedLabel}
+      onRemove={activeContext.remove}
+      onClear={activeContext.clear}
+      compact={!isWide}
+      popoverAlign={isWide ? "start" : "end"}
+    />
+  );
+
+  const showAttachments = fixture ||
+    baseDocumentCapabilities.canListAttachments;
+  const showAttachmentSidebar = showAttachments && isWide &&
+    width !== null && width >= ATTACHMENT_SIDEBAR_MIN_WIDTH;
+  const attachmentSection = showAttachments
+    ? (
+      <AttachmentsSection
+        controller={attachments}
+        capabilities={attachmentCapabilities}
+        layout={layout}
+        context={{
+          canShareResource: (resource) =>
+            canShareActiveContextResource(hostCapabilities, resource),
+          activate: activeContext.activate,
+          isSelected: activeContext.isSelected,
+        }}
+      />
+    )
+    : null;
+
+  /* ── Sauts de navigation ─────────────────────────────────────────────── */
+
+  const { jumpsEnabled } = viewerNav;
+  const party = data.customer ?? data.supplier ?? data.party_name ?? "";
+  const jumpSubtitle = t("nav.linked_to", { id: data.name });
+  const rootNavigationActions = invoiceRootNavigationActions(
+    hints,
+    { id: data.name, doctype, party },
+    jumpSubtitle,
+    availableTools,
+    jumpsEnabled,
+  );
+  const mutations = invoiceMutationActions(
+    doctype,
+    data.name,
+    hasServerTools ? availableTools : [],
+    mutationCommitted,
+  );
+
+  /** Envoie une question au chat (chemin de secours sans outils). */
+  const { ask } = viewerNav;
+
+  /* ── Messages erreur / action ─────────────────────────────────────────── */
+
+  const messages = (
+    <>
+      {error && (
+        <div class="px-4 pt-3">
+          <StateMessage tone="bad">{error}</StateMessage>
+        </div>
+      )}
+      {!error && actionMessage && (
+        <div class="px-4 pt-3">
+          <StateMessage tone={actionIsError ? "bad" : "neutral"}>
+            {actionMessage}
+          </StateMessage>
+        </div>
+      )}
+    </>
+  );
+
+  /* ── Boutons d'action ─────────────────────────────────────────────────── */
+
+  function navigationButton(action: InvoiceRootNavigationAction) {
+    if (
+      !canOfferNavigation(
+        action.jump,
+        messagesEnabled && action.message !== null,
+        fixture,
+      )
+    ) return null;
+    const actionKey = `nav_${action.key}`;
+    return (
+      <Button
+        key={action.key}
+        variant={action.key === "payments" ? "accent" : "secondary"}
+        class={cx(
+          "group",
+          isMobile
+            ? "min-h-[44px] w-full rounded-touch text-body"
+            : "text-cell",
+        )}
+        disabled={fixture || actionLoading === actionKey}
+        title={fixture
+          ? previewTitle
+          : t("invoice.btn.related.title", { label: action.label })}
+        onClick={() => {
+          if (action.jump) {
+            void nav.jump(action.jump);
+          } else if (action.message) {
+            void onNavigate(actionKey, action.message);
+          }
+        }}
+      >
+        {actionLoading === actionKey ? "…" : action.label}
+        {action.jump && (
+          <span
+            aria-hidden="true"
+            class={cx(
+              "ml-1 text-accent",
+              !isMobile &&
+                "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+            )}
+          >
+            ›
+          </span>
+        )}
+      </Button>
+    );
+  }
+
+  const rootNavigationButtons = rootNavigationActions.map(navigationButton);
+
+  const btnSubmit = isDraft && (mutations.submit || fixture) && (
+    <Button
+      variant="accent"
+      class={isMobile ? "min-h-[44px] rounded-touch text-body" : "text-cell"}
+      disabled={fixture || actionLoading === "submit" ||
+        canonicalRefreshPending ||
+        attachmentMutationBusy}
+      title={fixture ? previewTitle : t("invoice.btn.submit.title")}
+      onClick={() =>
+        confirm.request({
+          subject: data.name,
+          title: t("invoice.confirm.submit"),
+          detail: submitAmount
+            ? t("invoice.confirm.submit.detail_with_amount", {
+              amount: submitAmount,
+            })
+            : t("invoice.confirm.submit.detail"),
+          actionLabel: submitAmount
+            ? t("invoice.confirm.submit.action_with_amount", {
+              amount: submitAmount,
+            })
+            : t("invoice.confirm.submit.action"),
+          onConfirm: () => {
+            if (!mutations.submit) return;
+            void callAction(
+              "submit",
+              mutations.submit.toolName,
+              mutations.submit.args,
+              t("invoice.action.submitted"),
+              { doctype, name: data.name },
+              nav.reportDocumentChange,
+            );
+          },
+        })}
+    >
+      {actionLoading === "submit" ? "…" : t("invoice.btn.submit.label")}
+    </Button>
+  );
+
+  const btnCancel = isSubmitted && (mutations.cancel || fixture) && (
+    <Button
+      variant="danger"
+      class={cx(
+        "border-bad/30",
+        isMobile
+          ? "w-full min-h-[44px] rounded-touch text-body"
+          : "ml-auto text-cell",
+      )}
+      disabled={fixture || actionLoading === "cancel" ||
+        canonicalRefreshPending ||
+        attachmentMutationBusy}
+      title={fixture ? previewTitle : t("invoice.btn.cancel.title")}
+      onClick={() =>
+        confirm.request({
+          subject: data.name,
+          title: t("invoice.confirm.cancel"),
+          detail: t("invoice.confirm.cancel.detail"),
+          actionLabel: t("invoice.confirm.cancel.action"),
+          onConfirm: () => {
+            if (!mutations.cancel) return;
+            void callAction(
+              "cancel",
+              mutations.cancel.toolName,
+              mutations.cancel.args,
+              t("invoice.action.cancelled"),
+              { doctype, name: data.name },
+              nav.reportDocumentChange,
+            );
+          },
+        })}
+    >
+      {actionLoading === "cancel" ? "…" : t("invoice.btn.cancel.label")}
+    </Button>
+  );
+  const hasActionButtons = Boolean(
+    rootNavigationButtons.some((button) => button !== null) || btnSubmit ||
+      btnCancel,
+  );
+
+  /* ── Totaux ───────────────────────────────────────────────────────────── */
+
+  const totalsPanel = (
+    <div class="flex flex-col gap-1.5 bg-sunken border-l border-line px-4 py-3.5">
+      <div class="flex items-baseline justify-between">
+        <span class="font-mono text-meta text-ink-faint">
+          {t("invoice.totals.subtotal")}
+        </span>
+        <span class="font-mono text-body tabular-nums text-ink-2">
+          {formatNumber(netTotal)}
+        </span>
+      </div>
+      <div class="flex items-baseline justify-between">
+        <span class="font-mono text-meta text-ink-faint">
+          {t("invoice.totals.taxes")}
+        </span>
+        <span class="font-mono text-body tabular-nums text-ink-faint">
+          {taxes !== 0 ? formatNumber(taxes) : "—"}
+        </span>
+      </div>
+      <div class="flex items-center justify-between border-t border-line-soft pt-2">
+        <span class="font-mono text-meta uppercase tracking-chip text-ink-muted">
+          {piGross
+            ? t("document.purchase_invoice.total")
+            : t("invoice.totals.grand_total")}
+        </span>
+        {invoiceTotalValue(
+          "font-display font-semibold tabular-nums text-ink text-[19px]",
+        )}
+      </div>
+    </div>
+  );
+
+  /* ══════════════════════════════════════════════════════════════
+     MISE EN PAGE LARGE
+  ══════════════════════════════════════════════════════════════ */
+
+  if (isWide) {
+    return (
+      <ViewerShell containerRef={ref}>
+        {/* Header 2 colonnes — toujours visible */}
         <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            marginBottom: 16,
-            flexWrap: "wrap",
-            gap: 8,
-          }}
+          class="grid gap-5 border-b border-line p-4"
+          style={{ gridTemplateColumns: "1fr auto" }}
         >
-          <div>
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                color: colors.text.muted,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                marginBottom: 4,
-              }}
-            >
+          <div class="flex min-w-0 flex-col gap-1.5">
+            <span class="font-mono text-micro uppercase tracking-eyebrow text-ink-faint">
               {doctype}
-            </div>
-            <div
-              style={{
-                fontSize: 20,
-                fontWeight: 700,
-                color: colors.text.primary,
-                fontFamily: fonts.mono,
-              }}
+            </span>
+            <h2
+              class="m-0 font-display font-semibold text-doc text-ink"
+              style={{ letterSpacing: "-0.015em" }}
             >
-              {data.name}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                gap: 8,
-                marginTop: 6,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <StatusBadge status={data.status} />
-              {data.company && (
-                <span style={{ fontSize: 11, color: colors.text.faint }}>
-                  {data.company}
+              {nav.isRoot
+                ? (
+                  <button
+                    type="button"
+                    {...contextInteractionProps(rootContextTarget)}
+                    class={cx(
+                      "rounded-[4px] transition-colors hover:bg-row-hover focus-visible:outline-2 focus-visible:outline-accent",
+                      rootContextTarget?.selected && "bg-row-selected",
+                    )}
+                  >
+                    {data.name}
+                  </button>
+                )
+                : nav.current.title}
+            </h2>
+            <div class="flex items-center gap-2">
+              {nav.isRoot && <StatusBadge status={data.status} />}
+              {refreshing && (
+                <span class="font-mono text-nano text-ink-faint">
+                  {t("common.refreshing")}
+                </span>
+              )}
+              {rootStaleIndicator}
+              {activeContextChip}
+              {nav.isRoot && (
+                <span class="text-data text-ink-muted">
+                  {partyName}
+                  {data.company ? ` · ${data.company}` : ""}
                 </span>
               )}
             </div>
           </div>
-          <button
-            onClick={() => void requestRefresh({ ignoreInterval: true })}
-            disabled={refreshing}
-            style={styles.button}
-          >
-            {refreshing ? "…" : "Refresh"}
-          </button>
-        </div>
 
-        {/* Feedback */}
-        {error && (
-          <FeedbackBanner
-            type="error"
-            message={error}
-            onDismiss={() => setError(null)}
-          />
-        )}
-        {!error && actionMessage && (
-          <FeedbackBanner type="success" message={actionMessage} />
-        )}
-
-        {/* Parties — two columns */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 16,
-            marginBottom: 16,
-            borderBottom: `1px solid ${colors.border}`,
-            paddingBottom: 16,
-          }}
-        >
-          <div>
-            <div
-              style={{
-                fontSize: 10,
-                color: colors.text.muted,
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-                marginBottom: 4,
-              }}
-            >
-              {isCustomer ? "Customer" : "Supplier"}
-            </div>
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 600,
-                color: colors.text.primary,
-              }}
-            >
-              {partyName}
-            </div>
-            {data.contact_email && (
-              <div style={{ fontSize: 11, color: colors.text.secondary }}>
-                {data.contact_email}
-              </div>
-            )}
-          </div>
-          <div>
-            <div
-              style={{
-                fontSize: 10,
-                color: colors.text.muted,
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-                marginBottom: 4,
-              }}
-            >
-              Outstanding
-            </div>
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 600,
-                color: isPaid ? colors.success : colors.error,
-                fontFamily: fonts.mono,
-              }}
-            >
-              {formatCurrency(outstanding, ccy)}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: isPaid ? colors.success : colors.error,
-              }}
-            >
-              {isPaid ? "Paid" : "Unpaid"}
-            </div>
-          </div>
-        </div>
-
-        {/* Dates — inline */}
-        <div
-          style={{ display: "flex", gap: 24, marginBottom: 16, fontSize: 12 }}
-        >
-          <span>
-            <span style={{ color: colors.text.muted }}>Date</span>
-            <span style={{ color: colors.text.primary, fontWeight: 500 }}>
-              {data.posting_date}
-            </span>
-          </span>
-          {data.due_date && (
-            <span>
-              <span style={{ color: colors.text.muted }}>Due</span>
-              <span style={{ color: colors.text.primary, fontWeight: 500 }}>
-                {data.due_date}
+          {nav.isRoot && (
+            <div class="flex flex-col items-end gap-1 border-l border-line pl-6">
+              <span class="font-mono text-micro uppercase tracking-label text-ink-faint">
+                {t("invoice.header.outstanding")}
               </span>
-            </span>
+              <span
+                class={cx(
+                  "font-display font-semibold tabular-nums leading-[1.05]",
+                  isPaid ? "text-ok" : "text-bad",
+                )}
+                style={{ fontSize: "30px" }}
+              >
+                {formatCurrency(outstanding, ccy)}
+              </span>
+              {data.due_date && (
+                <span class="font-mono text-meta text-ink-muted">
+                  {t("invoice.header.due", { date: data.due_date })}
+                </span>
+              )}
+            </div>
           )}
         </div>
 
-        {/* Line Items — clickable for item drill-down */}
-        {items.length > 0 && (
-          <div
-            style={{
-              border: `1px solid ${colors.border}`,
-              borderRadius: 12,
-              overflowX: "auto",
-              marginBottom: 16,
-            }}
-          >
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th
-                    style={{
-                      ...styles.tableHeader,
-                      background: colors.bg.surface,
-                    }}
-                  >
-                    Item
-                  </th>
-                  <th
-                    style={{
-                      ...styles.tableHeader,
-                      background: colors.bg.surface,
-                      textAlign: "right",
-                    }}
-                  >
-                    Qty
-                  </th>
-                  <th
-                    style={{
-                      ...styles.tableHeader,
-                      background: colors.bg.surface,
-                      textAlign: "right",
-                    }}
-                  >
-                    Rate
-                  </th>
-                  <th
-                    style={{
-                      ...styles.tableHeader,
-                      background: colors.bg.surface,
-                      textAlign: "right",
-                    }}
-                  >
-                    Amount
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item, idx) => {
-                  const isExpanded = expandedIdx === idx;
-                  return (
-                    <tr key={idx}>
-                      <td colSpan={4} style={{ padding: 0 }}>
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns: "35% 15% 25% 25%",
-                            cursor: hasServerTools ? "pointer" : "default",
-                            transition: "background 0.1s",
-                            background: isExpanded
-                              ? colors.bg.hover
-                              : "transparent",
-                          }}
-                          onClick={hasServerTools
-                            ? () => setExpandedIdx(isExpanded ? null : idx)
-                            : undefined}
-                          onMouseEnter={(e) => {
-                            if (!isExpanded) {
-                              (e.currentTarget as HTMLElement).style
-                                .background = colors.bg.hover;
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!isExpanded) {
-                              (e.currentTarget as HTMLElement).style
-                                .background = "transparent";
-                            }
-                          }}
-                        >
-                          <div style={styles.tableCell}>
-                            <div
-                              style={{
-                                fontWeight: 500,
-                                color: colors.text.primary,
-                              }}
-                            >
-                              {item.item_name ?? item.item_code}
-                            </div>
-                            {item.item_name && (
-                              <div
-                                style={{
-                                  fontSize: 11,
-                                  color: colors.text.faint,
-                                  fontFamily: fonts.mono,
-                                }}
-                              >
-                                {item.item_code}
-                              </div>
-                            )}
-                          </div>
-                          <div
-                            style={{
-                              ...styles.tableCell,
-                              textAlign: "right",
-                              fontFamily: fonts.mono,
-                            }}
-                          >
-                            {item.qty}
-                          </div>
-                          <div
-                            style={{
-                              ...styles.tableCell,
-                              textAlign: "right",
-                              fontFamily: fonts.mono,
-                              color: colors.text.secondary,
-                            }}
-                          >
-                            {formatCurrency(item.rate, ccy)}
-                          </div>
-                          <div
-                            style={{
-                              ...styles.tableCell,
-                              textAlign: "right",
-                              fontFamily: fonts.mono,
-                              fontWeight: 500,
-                            }}
-                          >
-                            {formatCurrency(item.amount, ccy)}
-                          </div>
-                        </div>
-                        {isExpanded && (
-                          <ItemDetailPanel
-                            app={app}
-                            itemCode={item.item_code}
-                            onClose={() => setExpandedIdx(null)}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        {/* PathBar — invisible au niveau 1 (crumbs.showBar = false) */}
+        <PathBar
+          layout={layout}
+          stack={nav.stack}
+          onBack={nav.pop}
+          onJump={nav.popTo}
+          loading={nav.current.loading}
+        />
 
-        {/* Totals — aligned right */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            marginBottom: 16,
-          }}
+        {/* Corps du niveau courant ; les enfants = contenu racine niveau 1 */}
+        <LevelBody
+          level={nav.current}
+          app={app}
+          list={list}
+          layout={layout as ViewerLayout}
+          fixture={fixture}
+          onJump={jumpsEnabled ? nav.jump : undefined}
+          onAsk={ask}
+          onError={setError}
+          onMutated={nav.markStale}
+          onDocumentChanged={nav.reportDocumentChange}
+          onMutationInvalidate={onBeginCanonicalReadback}
+          onMutationRefresh={() => scheduleCanonicalRefresh(false)}
+          onRefresh={() => void nav.refreshLevel()}
+          context={context}
+          contextView={contextView}
         >
+          {/* ── Contenu racine (niveau 1 seulement) ── */}
+          {messages}
+
           <div
-            style={{
-              minWidth: 220,
-              borderTop: `1px solid ${colors.border}`,
-              paddingTop: 8,
-            }}
+            class={showAttachmentSidebar ? "grid min-w-0" : "min-w-0"}
+            style={showAttachmentSidebar
+              ? { gridTemplateColumns: "minmax(0, 1fr) 268px" }
+              : undefined}
           >
-            <TotalRow label="Subtotal" value={formatCurrency(netTotal, ccy)} />
-            {taxes !== 0 && (
-              <TotalRow label="Taxes" value={formatCurrency(taxes, ccy)} />
+            <div class="min-w-0">
+              {/* En-tête de tableau */}
+              <div class="flex border-b border-line bg-sunken">
+                <div
+                  class="grid min-w-0 flex-1"
+                  style={{
+                    gridTemplateColumns: "2.6fr 0.5fr 0.9fr 1fr",
+                    padding: "8px 16px",
+                  }}
+                >
+                  <span class="font-mono text-micro uppercase tracking-label text-ink-faint">
+                    {t("invoice.table.col.item")}
+                  </span>
+                  <span class="font-mono text-micro uppercase tracking-label text-ink-faint text-right">
+                    {t("invoice.table.col.qty")}
+                  </span>
+                  <span class="font-mono text-micro uppercase tracking-label text-ink-faint text-right">
+                    {t("invoice.table.col.rate")}
+                  </span>
+                  <span class="font-mono text-micro uppercase tracking-label text-ink-faint text-right">
+                    {t("invoice.table.col.amount")}
+                  </span>
+                </div>
+                {canExpand && <span aria-hidden="true" class="w-10" />}
+              </div>
+
+              {/* Lignes article */}
+              {rows.map((row, rowIndex) => {
+                const interactionTarget = lineInteractionTarget(row, rowIndex);
+                const isExpanded = canExpand && expandedIdx === row.idx;
+                const isContextSelected = Boolean(interactionTarget?.selected);
+                return (
+                  <div key={`${row.idx}-${row.item_code}`}>
+                    <div
+                      class={cx(
+                        "flex min-w-0 items-stretch border-b border-line-soft transition-colors",
+                        isExpanded || isContextSelected
+                          ? "bg-row-selected"
+                          : "hover:bg-row-hover",
+                      )}
+                      style={{
+                        borderLeft: `2px solid ${
+                          isExpanded ? "var(--color-accent)" : "transparent"
+                        }`,
+                        borderRight: `2px solid ${
+                          isContextSelected
+                            ? "var(--color-accent)"
+                            : "transparent"
+                        }`,
+                      }}
+                    >
+                      <div
+                        class={cx(
+                          "grid min-w-0 flex-1 items-center focus-visible:outline-2 focus-visible:outline-accent",
+                          interactionTarget && "cursor-pointer",
+                        )}
+                        style={{
+                          gridTemplateColumns: "2.6fr 0.5fr 0.9fr 1fr",
+                          padding: "10px 16px",
+                        }}
+                        {...contextInteractionProps(interactionTarget, {
+                          arbiter: clickIntent,
+                          key: `invoice-line:${data.name}:${rowIndex}`,
+                        })}
+                      >
+                        <div class="flex flex-col gap-0.5">
+                          <span class="text-body text-ink">
+                            {row.item_name ?? row.item_code}
+                          </span>
+                          <span class="font-mono text-chip text-ink-faint">
+                            {row.item_code}
+                          </span>
+                        </div>
+                        <span class="font-mono text-cell tabular-nums text-ink-2 text-right">
+                          {formatNumber(row.qty)}
+                        </span>
+                        <span class="font-mono text-cell tabular-nums text-ink-muted text-right">
+                          {formatNumber(row.rate)}
+                        </span>
+                        <span class="font-mono text-cell font-medium tabular-nums text-ink text-right">
+                          {formatNumber(row.amount)}
+                        </span>
+                      </div>
+                      {canExpand && (
+                        <DetailToggleButton
+                          expanded={isExpanded}
+                          label={interactionTarget?.detailLabel ??
+                            row.item_code}
+                          controls={lineDetailId(rowIndex)}
+                          onToggle={() =>
+                            interactionTarget?.onDoubleActivate?.()}
+                        />
+                      )}
+                    </div>
+
+                    {isExpanded && (
+                      <div id={lineDetailId(rowIndex)}>
+                        <ItemDetailPanel
+                          app={app}
+                          itemCode={row.item_code}
+                          fixture={fixture}
+                          availableTools={availableTools}
+                          hints={hints ?? undefined}
+                          onJump={jumpsEnabled ? nav.jump : undefined}
+                          onClose={() => setExpandedIdx(null)}
+                          lineIndex={row.idx}
+                          lineCount={rows.length}
+                          lineQty={row.qty}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Footer : boutons gauche | totaux droite */}
+              <div
+                class="grid border-t border-line"
+                style={{ gridTemplateColumns: "1fr 300px" }}
+              >
+                <div class="flex flex-wrap items-center gap-2 px-4 py-3.5">
+                  {btnSubmit}
+                  {rootNavigationButtons}
+                  {btnCancel}
+                </div>
+                {totalsPanel}
+              </div>
+              {!showAttachmentSidebar && attachmentSection && (
+                <div class="border-t border-line">{attachmentSection}</div>
+              )}
+            </div>
+            {showAttachmentSidebar && (
+              <aside class="min-w-0 border-l border-line bg-sunken/35">
+                {attachmentSection}
+              </aside>
             )}
-            <TotalRow
-              label="Grand Total"
-              value={formatCurrency(data.grand_total, ccy)}
-              bold
-            />
           </div>
+        </LevelBody>
+
+        {/* Pied de marque — toujours visible */}
+        <div class="flex justify-end border-t border-line px-4 py-[9px]">
+          <CasysCredit />
+        </div>
+        <ConfirmSheet confirm={confirm} />
+      </ViewerShell>
+    );
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     MISE EN PAGE ÉTROITE — mobile et panel
+  ══════════════════════════════════════════════════════════════ */
+
+  return (
+    <ViewerShell containerRef={ref}>
+      {/* Header flex-col — toujours visible */}
+      <div class="flex flex-col gap-[10px] border-b border-line px-3 py-[13px]">
+        <div class="flex flex-col gap-[3px]">
+          <span class="font-mono text-nano uppercase tracking-eyebrow text-ink-faint">
+            {doctype}
+          </span>
+          <h3 class="m-0 font-display font-semibold text-title text-ink tracking-title">
+            {nav.isRoot
+              ? (
+                <button
+                  type="button"
+                  {...contextInteractionProps(rootContextTarget)}
+                  class={cx(
+                    "rounded-[4px] transition-colors hover:bg-row-hover focus-visible:outline-2 focus-visible:outline-accent",
+                    rootContextTarget?.selected && "bg-row-selected",
+                  )}
+                >
+                  {data.name}
+                </button>
+              )
+              : nav.current.title}
+          </h3>
+          {nav.isRoot && (
+            <span class="text-data text-ink-muted">{partyName}</span>
+          )}
         </div>
 
-        {/* Actions */}
-        {hasServerTools && (
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              padding: "12px 0",
-              borderTop: `1px solid ${colors.border}`,
-            }}
-          >
-            {isDraft && (
-              <ActionButton
-                label="Submit"
-                variant="success"
-                confirm
-                loading={actionLoading === "submit"}
-                onClick={() =>
-                  callAction("submit", "erpnext_doc_submit", {
-                    doctype,
-                    name: data.name,
-                  }, "Submitted")}
-              />
-            )}
-            {isSubmitted && (
-              <ActionButton
-                label="Cancel"
-                variant="error"
-                confirm
-                loading={actionLoading === "cancel"}
-                onClick={() =>
-                  callAction("cancel", "erpnext_doc_cancel", {
-                    doctype,
-                    name: data.name,
-                  }, "Cancelled")}
-              />
-            )}
-            <ActionButton
-              label="Payments"
-              loading={actionLoading === "nav_payments"}
-              onClick={() =>
-                navigate(
-                  "nav_payments",
-                  `Show payment entries for ${doctype} ${data.name}`,
+        {nav.isRoot && (
+          <div class="flex items-end justify-between gap-3 border-t border-line-soft pt-[10px]">
+            <div class="flex flex-col gap-0.5">
+              <span class="font-mono text-nano uppercase tracking-label text-ink-faint">
+                {t("invoice.header.outstanding")}
+              </span>
+              <span
+                class={cx(
+                  "font-display font-semibold text-amount tabular-nums leading-[1.05]",
+                  isPaid ? "text-ok" : "text-bad",
                 )}
-            />
-            {(data.customer ?? data.supplier) && (
-              <ActionButton
-                label={isCustomer ? "Customer invoices" : "Supplier invoices"}
-                loading={actionLoading === "nav_party"}
-                onClick={() => {
-                  const party = data.customer ?? data.supplier;
-                  navigate(
-                    "nav_party",
-                    `Show all ${
-                      isCustomer ? "sales" : "purchase"
-                    } invoices for ${
-                      isCustomer ? "customer" : "supplier"
-                    } ${party}`,
-                  );
-                }}
-              />
-            )}
+              >
+                {formatCurrency(outstanding, ccy)}
+              </span>
+            </div>
+            <div class="flex flex-col items-end gap-[5px]">
+              <StatusBadge status={data.status} />
+              {rootStaleIndicator}
+              {activeContextChip}
+              {data.due_date && (
+                <span class="font-mono text-chip text-ink-muted">
+                  {t("invoice.header.due", { date: data.due_date.slice(5) })}
+                </span>
+              )}
+            </div>
           </div>
         )}
       </div>
-      <ErpNextBrandFooter />
-    </div>
+
+      {/* PathBar — invisible au niveau 1 */}
+      <PathBar
+        layout={layout}
+        stack={nav.stack}
+        onBack={nav.pop}
+        onJump={nav.popTo}
+        loading={nav.current.loading}
+      />
+
+      {/* Corps du niveau courant */}
+      <LevelBody
+        level={nav.current}
+        app={app}
+        list={list}
+        layout={layout as ViewerLayout}
+        fixture={fixture}
+        onJump={jumpsEnabled ? nav.jump : undefined}
+        onAsk={ask}
+        onError={setError}
+        onMutated={nav.markStale}
+        onDocumentChanged={nav.reportDocumentChange}
+        onMutationInvalidate={onBeginCanonicalReadback}
+        onMutationRefresh={() => scheduleCanonicalRefresh(false)}
+        onRefresh={() => void nav.refreshLevel()}
+        context={context}
+        contextView={contextView}
+      >
+        {/* ── Contenu racine (niveau 1 seulement) ── */}
+        {messages}
+
+        {/* Section lignes — cartes */}
+        <div class="flex flex-col gap-[7px] border-b border-line px-3 py-[11px]">
+          <span class="font-mono text-nano uppercase tracking-label text-ink-faint">
+            {t("invoice.lines.count", {
+              n: rows.length,
+              s: rows.length > 1 ? "s" : "",
+            })}
+          </span>
+          {rows.map((row, rowIndex) => {
+            const interactionTarget = lineInteractionTarget(row, rowIndex);
+            const isExpanded = canExpand && expandedIdx === row.idx;
+            const isContextSelected = Boolean(interactionTarget?.selected);
+            return (
+              <div key={`${row.idx}-${row.item_code}`}>
+                <div
+                  class={cx(
+                    "flex min-h-11 items-stretch rounded-chip border border-line transition-colors",
+                    isExpanded || isContextSelected
+                      ? "bg-row-selected"
+                      : "bg-row-hover",
+                  )}
+                  style={{
+                    borderLeft: `2px solid ${
+                      isExpanded ? "var(--color-accent)" : "transparent"
+                    }`,
+                    borderRight: `2px solid ${
+                      isContextSelected ? "var(--color-accent)" : "transparent"
+                    }`,
+                  }}
+                >
+                  <div
+                    class={cx(
+                      "flex min-w-0 flex-1 flex-col gap-[5px] px-[11px] py-[10px] focus-visible:outline-2 focus-visible:outline-accent",
+                      interactionTarget && "cursor-pointer",
+                    )}
+                    {...contextInteractionProps(interactionTarget, {
+                      arbiter: clickIntent,
+                      key: `invoice-line:${data.name}:${rowIndex}`,
+                    })}
+                  >
+                    <span
+                      class={cx(
+                        "text-cell",
+                        isExpanded || isContextSelected
+                          ? "text-ink"
+                          : "text-ink-2",
+                      )}
+                    >
+                      {row.item_name ?? row.item_code}
+                    </span>
+                    <div class="flex items-baseline justify-between gap-[10px]">
+                      <span class="font-mono text-chip text-ink-faint">
+                        {formatNumber(row.qty)} × {formatNumber(row.rate)}
+                      </span>
+                      <span
+                        class={cx(
+                          "font-mono text-cell tabular-nums text-ink",
+                          isExpanded || isContextSelected ? "font-medium" : "",
+                        )}
+                      >
+                        {formatNumber(row.amount)}
+                      </span>
+                    </div>
+                  </div>
+                  {canExpand && (
+                    <DetailToggleButton
+                      expanded={isExpanded}
+                      label={interactionTarget?.detailLabel ?? row.item_code}
+                      controls={lineDetailId(rowIndex)}
+                      onToggle={() => interactionTarget?.onDoubleActivate?.()}
+                      touch
+                    />
+                  )}
+                </div>
+                {isExpanded && (
+                  <div id={lineDetailId(rowIndex)}>
+                    <ItemDetailPanel
+                      app={app}
+                      itemCode={row.item_code}
+                      fixture={fixture}
+                      availableTools={availableTools}
+                      hints={hints ?? undefined}
+                      onJump={jumpsEnabled ? nav.jump : undefined}
+                      onClose={() => setExpandedIdx(null)}
+                      lineIndex={row.idx}
+                      lineCount={rows.length}
+                      lineQty={row.qty}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Bande grand total */}
+        <div class="flex items-center justify-between border-b border-line bg-sunken px-3 py-[11px]">
+          <span class="font-mono text-micro uppercase tracking-chip text-ink-muted">
+            {piGross
+              ? t("document.purchase_invoice.total")
+              : t("invoice.totals.grand_total")}
+          </span>
+          {invoiceTotalValue(
+            "font-display text-title font-semibold tabular-nums text-ink",
+          )}
+        </div>
+
+        {attachmentSection && (
+          <div class="border-b border-line">{attachmentSection}</div>
+        )}
+
+        {/* CTA section */}
+        {hasActionButtons && (
+          <div class="flex flex-col gap-[7px] px-3 py-[11px]">
+            {rootNavigationButtons}
+            {btnCancel}
+            {btnSubmit}
+          </div>
+        )}
+      </LevelBody>
+
+      {/* Pied de marque — toujours visible */}
+      <div class="flex justify-end border-t border-line px-3 py-[9px]">
+        <CasysCredit compact />
+      </div>
+      <ConfirmSheet confirm={confirm} />
+    </ViewerShell>
   );
 }

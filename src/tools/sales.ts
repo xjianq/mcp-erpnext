@@ -8,7 +8,7 @@
 
 import type { FrappeFilter } from "../api/types.ts";
 import type { ErpNextTool } from "./types.ts";
-import { DOCLIST_META, INVOICE_META } from "./viewer-meta.ts";
+import { DOC_META, DOCLIST_META, INVOICE_META } from "./viewer-meta.ts";
 import { resolveCustomer, resolveDynamicLink } from "../api/resolve.ts";
 import {
   roundedTotalFallbackWarning,
@@ -29,6 +29,21 @@ interface MapLineItemsOptions {
   defaultDeliveryDate?: string;
   /** Pass per-line warehouse through. Default true; set false for Quotation. */
   includeWarehouse?: boolean;
+}
+
+function viewerDocument(
+  value: unknown,
+  doctype: string,
+  name?: string,
+): Record<string, unknown> {
+  const record = typeof value === "object" && value !== null
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    ...record,
+    ...(typeof record.name === "string" || !name ? {} : { name }),
+    doctype,
+  };
 }
 
 /**
@@ -132,6 +147,7 @@ export const salesTools: ErpNextTool[] = [
   {
     name: "erpnext_customer_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single ERPNext customer by name (ID). Returns all fields including contact details.",
     category: "sales",
@@ -147,7 +163,7 @@ export const salesTools: ErpNextTool[] = [
         throw new Error("[erpnext_customer_get] 'name' is required");
       }
       const doc = await ctx.client.get("Customer", input.name as string);
-      return { data: doc };
+      return { data: { ...doc, doctype: "Customer" } };
     },
   },
 
@@ -288,7 +304,9 @@ export const salesTools: ErpNextTool[] = [
         filters.push([
           "customer",
           "=",
-          await resolveCustomer(ctx.client, input.customer as string),
+          await resolveCustomer(ctx.client, input.customer as string, {
+            inputPath: "customer",
+          }),
         ]);
       }
       if (input.status) {
@@ -346,7 +364,7 @@ export const salesTools: ErpNextTool[] = [
         throw new Error("[erpnext_sales_order_get] 'name' is required");
       }
       const doc = await ctx.client.get("Sales Order", input.name as string);
-      return { data: doc };
+      return { data: viewerDocument(doc, "Sales Order", input.name as string) };
     },
   },
 
@@ -436,8 +454,12 @@ export const salesTools: ErpNextTool[] = [
       const doc = await ctx.client.create("Sales Order", data);
 
       return {
-        data: doc,
+        data: viewerDocument(doc, "Sales Order"),
         message: `Sales Order ${doc.name} created successfully`,
+        refreshRequest: {
+          toolName: "erpnext_sales_order_get",
+          arguments: { name: doc.name },
+        },
       };
     },
   },
@@ -539,8 +561,16 @@ export const salesTools: ErpNextTool[] = [
       const warnings = roundedTotalFallbackWarning(docWithDoctype, patchedDoc);
 
       return {
-        data: result,
+        data: viewerDocument(
+          result,
+          "Sales Order",
+          input.name as string,
+        ),
         message: `Sales Order ${input.name} submitted successfully`,
+        refreshRequest: {
+          toolName: "erpnext_sales_order_get",
+          arguments: { name: input.name },
+        },
         ...(warnings.length > 0 ? { warnings } : {}),
       };
     },
@@ -619,7 +649,9 @@ export const salesTools: ErpNextTool[] = [
         filters.push([
           "customer",
           "=",
-          await resolveCustomer(ctx.client, input.customer as string),
+          await resolveCustomer(ctx.client, input.customer as string, {
+            inputPath: "customer",
+          }),
         ]);
       }
       if (input.status) {
@@ -679,7 +711,11 @@ export const salesTools: ErpNextTool[] = [
       }
       const doc = await ctx.client.get("Sales Invoice", input.name as string);
       return {
-        data: doc,
+        data: viewerDocument(
+          doc,
+          "Sales Invoice",
+          input.name as string,
+        ),
         _meta: INVOICE_META,
       };
     },
@@ -774,9 +810,13 @@ export const salesTools: ErpNextTool[] = [
 
       const doc = await ctx.client.create("Sales Invoice", data);
       return {
-        data: doc,
+        data: viewerDocument(doc, "Sales Invoice"),
         message: `Sales Invoice ${doc.name} created successfully`,
         _meta: INVOICE_META,
+        refreshRequest: {
+          toolName: "erpnext_sales_invoice_get",
+          arguments: { name: doc.name },
+        },
       };
     },
   },
@@ -817,9 +857,17 @@ export const salesTools: ErpNextTool[] = [
       const warnings = roundedTotalFallbackWarning(docWithDoctype, patchedDoc);
 
       return {
-        data: result,
+        data: viewerDocument(
+          result,
+          "Sales Invoice",
+          input.name as string,
+        ),
         message: `Sales Invoice ${input.name} submitted successfully`,
         _meta: INVOICE_META,
+        refreshRequest: {
+          toolName: "erpnext_sales_invoice_get",
+          arguments: { name: input.name },
+        },
         ...(warnings.length > 0 ? { warnings } : {}),
       };
     },
@@ -878,6 +926,7 @@ export const salesTools: ErpNextTool[] = [
             ctx.client,
             input.quotation_to as string,
             input.party_name as string,
+            { inputPath: "party_name" },
           ),
         ]);
       }
@@ -935,7 +984,7 @@ export const salesTools: ErpNextTool[] = [
         throw new Error("[erpnext_quotation_get] 'name' is required");
       }
       const doc = await ctx.client.get("Quotation", input.name as string);
-      return { data: doc };
+      return { data: viewerDocument(doc, "Quotation", input.name as string) };
     },
   },
 
@@ -1013,7 +1062,7 @@ export const salesTools: ErpNextTool[] = [
           ctx.client,
           input.quotation_to as string,
           input.party_name as string,
-          { allowPartialMatch: false },
+          { allowPartialMatch: false, inputPath: "party_name" },
         ),
         items,
       };
@@ -1033,8 +1082,12 @@ export const salesTools: ErpNextTool[] = [
 
       const doc = await ctx.client.create("Quotation", data);
       return {
-        data: doc,
+        data: viewerDocument(doc, "Quotation"),
         message: `Quotation ${doc.name} created successfully`,
+        refreshRequest: {
+          toolName: "erpnext_quotation_get",
+          arguments: { name: doc.name },
+        },
       };
     },
   },

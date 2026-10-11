@@ -40,6 +40,8 @@ export interface FrappeFile extends FrappeDoc {
   file_url: string;
   /** 1 for private files, 0 for public files. */
   is_private: 0 | 1;
+  /** Size in bytes, as stored by Frappe. Absent on some older rows. */
+  file_size?: number;
   /** DocType the file is attached to. */
   attached_to_doctype?: string;
   /** Document name the file is attached to. */
@@ -62,6 +64,30 @@ export interface FrappeFileUploadInput {
   attachedToField?: string;
   /** Whether Frappe should store the file privately. Defaults to true. */
   isPrivate?: boolean;
+}
+
+/** Input for a bounded, authenticated download of an attached Frappe File. */
+export interface FrappeFileDownloadInput {
+  /** Native `File.name` identifier. Never a URL. */
+  fileId: string;
+  /** Expected parent DocType. Used to prevent cross-document downloads. */
+  attachedToDoctype: string;
+  /** Expected parent document name. Used to prevent cross-document downloads. */
+  attachedToName: string;
+}
+
+/** Bytes and trusted metadata returned by a bounded Frappe File download. */
+export interface FrappeFileDownload {
+  /** Native `File.name` identifier. */
+  fileId: string;
+  /** Sanitized filename safe to expose through a `file:///` resource URI. */
+  fileName: string;
+  /** Response MIME type, or `application/octet-stream` when unavailable. */
+  mimeType: string;
+  /** Fully read file bytes, bounded by the configured download limit. */
+  bytes: Uint8Array;
+  /** Whether the File row is private. */
+  isPrivate: boolean;
 }
 
 /** Frappe list API response wrapper. Returned by `GET /api/resource/{doctype}`. */
@@ -94,12 +120,20 @@ export interface FrappeErrorResponse {
   message?: string;
 }
 
-/** Frappe list filter: [field, operator, value]. Array values pair with the "in"/"not in" operators. */
-export type FrappeFilter = [
-  string,
-  string,
-  string | number | boolean | null | (string | number)[],
-];
+/** Frappe list filter: [field, operator, value] or [child doctype, field, operator, value]. Array values pair with the "in"/"not in" operators. */
+export type FrappeFilterValue =
+  | string
+  | number
+  | boolean
+  | null
+  | (string | number)[];
+/**
+ * `[field, operator, value]`, ou `[child doctype, field, operator, value]`
+ * pour filtrer sur une table enfant — la forme que `frappe.get_list` accepte.
+ */
+export type FrappeFilter =
+  | [string, string, FrappeFilterValue]
+  | [string, string, string, FrappeFilterValue];
 
 /** Options for Frappe list queries (`GET /api/resource/{doctype}`). */
 export interface FrappeListOptions {

@@ -10,7 +10,12 @@
 // deno-lint-ignore-file no-explicit-any
 
 import { assert, assertEquals } from "@std/assert";
-import { analyticsTools } from "./analytics.ts";
+import { SchemaValidator } from "@casys/mcp-server";
+import {
+  analyticsTools,
+  frappeCalendarMonth,
+  localCalendarDate,
+} from "./analytics.ts";
 import type { FrappeClient } from "../api/frappe-client.ts";
 import type { ErpNextToolContext } from "./types.ts";
 
@@ -20,8 +25,17 @@ function relativeMonth(monthsBack: number, day = 15): string {
   const d = new Date();
   d.setDate(day);
   d.setMonth(d.getMonth() - monthsBack);
-  return d.toISOString().split("T")[0];
+  return localCalendarDate(d);
 }
+
+Deno.test("analytics calendar dates never shift through UTC", () => {
+  assertEquals(frappeCalendarMonth("2026-09-01"), {
+    year: 2026,
+    month: 8,
+  });
+  assertEquals(frappeCalendarMonth("2026-13-01"), null);
+  assertEquals(localCalendarDate(new Date(2026, 8, 1)), "2026-09-01");
+});
 
 // ── Mock FrappeClient ─────────────────────────────────────────────────────────
 
@@ -162,6 +176,43 @@ Deno.test("erpnext_sales_chart - customer grouping returns horizontal-bar", asyn
   assertChartMeta(result);
 });
 
+Deno.test("erpnext_sales_chart - preserves the published grouping populations", async () => {
+  const cases = [
+    ["customer", false, "Sales Invoice", [["docstatus", "=", 1]]],
+    ["customer", true, "Sales Invoice", []],
+    ["item", false, "Sales Invoice Item", [["docstatus", "=", 1]]],
+    ["item", true, "Sales Invoice Item", [["docstatus", "=", 1]]],
+    ["status", false, "Sales Invoice", [["docstatus", "!=", 2]]],
+    ["status", true, "Sales Invoice", [["docstatus", "!=", 2]]],
+  ] as const;
+  const tool = getTool("erpnext_sales_chart");
+
+  for (
+    const [groupBy, includeDrafts, expectedDoctype, expectedFilter] of cases
+  ) {
+    let capturedDoctype = "";
+    let capturedFilters: unknown;
+    const client = makeMockClient({
+      list: async (doctype: string, options: { filters?: unknown }) => {
+        capturedDoctype = doctype;
+        capturedFilters = options.filters;
+        return [];
+      },
+    });
+
+    await tool.handler(
+      { group_by: groupBy, include_drafts: includeDrafts },
+      makeCtx(client),
+    );
+    assertEquals(capturedDoctype, expectedDoctype, groupBy);
+    assertEquals(
+      capturedFilters,
+      expectedFilter,
+      `${groupBy}/include_drafts=${includeDrafts}`,
+    );
+  }
+});
+
 // ── erpnext_revenue_trend ───────────────────────────────────────────────────
 
 Deno.test("erpnext_revenue_trend - returns line chart with monthly data", async () => {
@@ -189,6 +240,8 @@ Deno.test("erpnext_revenue_trend - returns line chart with monthly data", async 
   assertEquals(result.type, "line");
   assertEquals(result.labels.length, 3);
   assertEquals(result.datasets.length, 1); // total mode
+  assertEquals(result.datasets[0].values.at(-1), 5000);
+  assertEquals(result.datasets[0].values.at(-2), 3000);
   assertChartMeta(result);
 });
 
@@ -285,6 +338,7 @@ Deno.test("erpnext_revenue_vs_orders - returns composed chart with dual axis", a
   assertEquals(result.datasets[0].type, "bar");
   assertEquals(result.datasets[1].type, "line");
   assertEquals(result.datasets[1].yAxisId, "right");
+  assertEquals(result.datasets[1].unit, "orders");
   // Acme: 2 orders, 8000 total
   assertEquals(result.datasets[0].values[0], 8000);
   assertEquals(result.datasets[1].values[0], 2);
@@ -365,6 +419,63 @@ Deno.test("erpnext_product_radar - returns radar with auto-selected items", asyn
   assertChartMeta(result);
 });
 
+Deno.test("erpnext_product_radar - the schema bounds the fan-out and still allows auto-select", () => {
+  // Exercised through the framework's validator against the tool's real schema,
+  // because that is the only place the bound lives — the handler holds no
+  // duplicate of it. Calling `tool.handler()` directly would bypass validation
+  // entirely and prove nothing about what a caller actually gets.
+  //
+  // The empty-array case is the one that matters most: it is the documented way
+  // to ask for auto-selection, so a lower bound on this array would reject a
+  // supported call as malformed. An earlier revision added `minItems: 2` and
+  // broke exactly that.
+  const validator = new SchemaValidator();
+  const tool = getTool("erpnext_product_radar");
+  validator.addSchema(tool.name, tool.inputSchema as Record<string, unknown>);
+
+  const items = (n: number) => ({
+    items: Array.from({ length: n }, (_, i) => `ITEM-${i}`),
+  });
+
+  assertEquals(
+    validator.validate(tool.name, items(9)).valid,
+    false,
+    "9 items must be rejected: each item costs one Bin query",
+  );
+  assertEquals(
+    validator.validate(tool.name, items(8)).valid,
+    true,
+    "8 is inside the contract",
+  );
+  assertEquals(
+    validator.validate(tool.name, { items: [] }).valid,
+    true,
+    "an empty array is the documented auto-select invocation",
+  );
+
+  // How that rejection is *worded* is the framework's contract, tested there.
+  // This asserts only what this repo owns: that the bound exists and that
+  // auto-selection stays reachable through it.
+});
+
+Deno.test("erpnext_product_radar - auto-select still works with no items given", async () => {
+  // Guards the behaviour the schema must keep reachable, end to end.
+  const mockClient = makeMockClient({
+    list: async (doctype: string, opts?: { limit?: number }) => {
+      if (doctype !== "Bin") return [];
+      return opts?.limit === 4
+        ? [{ item_code: "ITEM-A" }, { item_code: "ITEM-B" }]
+        : [{ actual_qty: 5, stock_value: 500 }];
+    },
+  });
+
+  const tool = getTool("erpnext_product_radar");
+  const result = await tool.handler({}, makeCtx(mockClient)) as any;
+
+  assertEquals(result.type, "radar");
+  assertEquals(result.datasets.length, 2);
+});
+
 // ── erpnext_price_vs_qty ────────────────────────────────────────────────────
 
 Deno.test("erpnext_price_vs_qty - falls back to Bin data when no Item Price", async () => {
@@ -397,13 +508,12 @@ Deno.test("erpnext_price_vs_qty - falls back to Bin data when no Item Price", as
 
 Deno.test("erpnext_kpi_revenue - returns KPI with sparkline (single API call)", async () => {
   const now = new Date();
-  const thisMonth = `${now.getFullYear()}-${
-    String(now.getMonth() + 1).padStart(2, "0")
-  }-15`;
-  const lastMonth =
-    new Date(now.getFullYear(), now.getMonth() - 1, 15).toISOString().split(
-      "T",
-    )[0];
+  const thisMonth = localCalendarDate(
+    new Date(now.getFullYear(), now.getMonth(), 1),
+  );
+  const lastMonth = localCalendarDate(
+    new Date(now.getFullYear(), now.getMonth() - 1, 1),
+  );
 
   const mockClient = makeMockClient({
     list: async () => [
@@ -420,6 +530,13 @@ Deno.test("erpnext_kpi_revenue - returns KPI with sparkline (single API call)", 
   assertEquals(result.value, 5000); // only current month bucket
   assert(Array.isArray(result.sparkline));
   assertEquals(result.sparkline.length, 6);
+  assertEquals(result.sparklineLabels.length, result.sparkline.length);
+  assertEquals(
+    result.sparklineLabels.at(-1),
+    `${now.toLocaleString("en", { month: "short" })} ${
+      now.getFullYear().toString().slice(2)
+    }`,
+  );
   assertEquals(result.sparkline[5], 5000); // current month
   assertEquals(result.sparkline[4], 3000); // previous month
   assert(result.trendIsGood === true);

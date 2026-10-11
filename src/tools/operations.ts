@@ -8,9 +8,9 @@
  * @module lib/erpnext/tools/operations
  */
 
-import type { FrappeFilter } from "../api/types.ts";
+import type { FrappeFile, FrappeFilter } from "../api/types.ts";
 import type { ErpNextTool } from "./types.ts";
-import { DOCLIST_META } from "./viewer-meta.ts";
+import { DOC_META, DOCLIST_META } from "./viewer-meta.ts";
 import {
   roundedTotalFallbackWarning,
   withRoundedTotalFallback,
@@ -23,9 +23,204 @@ import {
   removeAssignment,
   validateAssignees,
 } from "./assignment.ts";
+import {
+  isMethodAllowed,
+  isValidMethodPath,
+  loadMethodAllowlist,
+} from "./method-allowlist.ts";
+import {
+  isPurchaseInvoiceDoctype,
+  withPurchaseInvoiceAccountHints,
+} from "./purchase-invoice-hints.ts";
+
+const DOC_LIST_MAX_LIMIT = 5_000;
+const DOC_LIST_MAX_OFFSET = 100_000;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 32 * 1024;
+  let binary = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.byteLength)),
+    );
+  }
+  return btoa(binary);
+}
+
+async function withPiAccountHintsIfNeeded<T>(
+  doctype: unknown,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return isPurchaseInvoiceDoctype(doctype)
+    ? await withPurchaseInvoiceAccountHints(fn)
+    : await fn();
+}
 
 export const operationsTools: ErpNextTool[] = [
   // ── File Attachments ───────────────────────────────────────────────────────
+
+  {
+    name: "erpnext_file_list",
+    annotations: { readOnlyHint: true },
+    description: "List the files attached to an ERPNext document. " +
+      "Returns name, size, privacy and URL for each attachment. " +
+      "Pairs with erpnext_file_upload: that one attaches, this one reads back.",
+    category: "operations",
+    inputSchema: {
+      type: "object",
+      properties: {
+        attached_to_doctype: {
+          type: "string",
+          description: "DocType of the document whose attachments to list.",
+          minLength: 1,
+        },
+        attached_to_name: {
+          type: "string",
+          description: "Name/ID of the document whose attachments to list.",
+          minLength: 1,
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of files to return. Defaults to 50.",
+          minimum: 1,
+          maximum: 500,
+        },
+      },
+      required: ["attached_to_doctype", "attached_to_name"],
+    },
+    handler: async (input, ctx) => {
+      for (
+        const field of ["attached_to_doctype", "attached_to_name"] as const
+      ) {
+        if (typeof input[field] !== "string" || !input[field].trim()) {
+          throw new Error(
+            `[erpnext_file_list] '${field}' must be a non-empty string`,
+          );
+        }
+      }
+      if (
+        input.limit !== undefined &&
+        (typeof input.limit !== "number" || !Number.isInteger(input.limit) ||
+          input.limit < 1 || input.limit > 500)
+      ) {
+        throw new Error(
+          "[erpnext_file_list] 'limit' must be an integer between 1 and 500",
+        );
+      }
+
+      // Files always hang off a document in Frappe: the File doctype carries
+      // attached_to_doctype / attached_to_name. A list filtered on both is the
+      // whole query — no join, no method call.
+      const files = await ctx.client.list<FrappeFile>("File", {
+        fields: [
+          "name",
+          "file_name",
+          "file_url",
+          "file_size",
+          "is_private",
+          "attached_to_field",
+          "creation",
+          "modified",
+          "owner",
+        ],
+        filters: [
+          ["attached_to_doctype", "=", input.attached_to_doctype as string],
+          ["attached_to_name", "=", input.attached_to_name as string],
+        ],
+        order_by: "creation desc",
+        limit: (input.limit as number | undefined) ?? 50,
+      });
+
+      return {
+        count: files.length,
+        data: files.map((file) => ({
+          name: file.name,
+          file_name: file.file_name,
+          file_url: file.file_url,
+          file_size: file.file_size ?? null,
+          is_private: file.is_private === 1,
+          attached_to_field: file.attached_to_field ?? null,
+          creation: file.creation,
+          modified: file.modified,
+          owner: file.owner,
+        })),
+      };
+    },
+  },
+
+  {
+    name: "erpnext_file_download",
+    annotations: { readOnlyHint: true },
+    _meta: {
+      ui: {
+        resourceUri: DOC_META.ui!.resourceUri,
+        visibility: ["app"],
+      },
+    },
+    description:
+      "Download one ERPNext attachment for the document viewer. The tool accepts a File ID, verifies its document attachment, and returns one embedded binary resource.",
+    category: "operations",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "Native ERPNext File.name identifier, never a URL.",
+          minLength: 1,
+        },
+        attached_to_doctype: {
+          type: "string",
+          description: "Expected parent document DocType.",
+          minLength: 1,
+        },
+        attached_to_name: {
+          type: "string",
+          description: "Expected parent document name/ID.",
+          minLength: 1,
+        },
+      },
+      required: ["file_id", "attached_to_doctype", "attached_to_name"],
+      additionalProperties: false,
+    },
+    handler: async (input, ctx) => {
+      for (
+        const field of [
+          "file_id",
+          "attached_to_doctype",
+          "attached_to_name",
+        ] as const
+      ) {
+        if (typeof input[field] !== "string" || !input[field].trim()) {
+          throw new Error(
+            `[erpnext_file_download] '${field}' must be a non-empty string`,
+          );
+        }
+      }
+
+      const file = await ctx.client.downloadFile({
+        fileId: (input.file_id as string).trim(),
+        attachedToDoctype: (input.attached_to_doctype as string).trim(),
+        attachedToName: (input.attached_to_name as string).trim(),
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Prepared ${file.fileName} for download (${file.bytes.byteLength} bytes).`,
+          },
+          {
+            type: "resource",
+            resource: {
+              uri: `file:///${encodeURIComponent(file.fileName)}`,
+              mimeType: file.mimeType,
+              blob: bytesToBase64(file.bytes),
+            },
+          },
+        ],
+      };
+    },
+  },
 
   {
     name: "erpnext_file_upload",
@@ -168,9 +363,13 @@ export const operationsTools: ErpNextTool[] = [
         );
       }
 
-      const doc = await ctx.client.create(
-        input.doctype as string,
-        input.data as Record<string, unknown>,
+      const doc = await withPiAccountHintsIfNeeded(
+        input.doctype,
+        () =>
+          ctx.client.create(
+            input.doctype as string,
+            input.data as Record<string, unknown>,
+          ),
       );
 
       return {
@@ -223,10 +422,14 @@ export const operationsTools: ErpNextTool[] = [
         );
       }
 
-      const doc = await ctx.client.update(
-        input.doctype as string,
-        input.name as string,
-        input.data as Record<string, unknown>,
+      const doc = await withPiAccountHintsIfNeeded(
+        input.doctype,
+        () =>
+          ctx.client.update(
+            input.doctype as string,
+            input.name as string,
+            input.data as Record<string, unknown>,
+          ),
       );
 
       return {
@@ -311,29 +514,34 @@ export const operationsTools: ErpNextTool[] = [
         throw new Error("[erpnext_doc_submit] 'name' is required");
       }
 
-      // Fetch fresh doc first — frappe.client.submit requires `modified` for optimistic
-      // locking, so this read must bypass the cache even if a recent copy is cached.
-      const doc = await ctx.client.get(
-        input.doctype as string,
-        input.name as string,
-        { skipCache: true },
-      );
-      const docWithDoctype = { ...doc, doctype: input.doctype as string };
-      const patchedDoc = withRoundedTotalFallback(docWithDoctype);
-      const result = await ctx.client.callMethod("frappe.client.submit", {
-        doc: patchedDoc,
+      return await withPiAccountHintsIfNeeded(input.doctype, async () => {
+        // Fetch fresh doc first — frappe.client.submit requires `modified` for optimistic
+        // locking, so this read must bypass the cache even if a recent copy is cached.
+        const doc = await ctx.client.get(
+          input.doctype as string,
+          input.name as string,
+          { skipCache: true },
+        );
+        const docWithDoctype = { ...doc, doctype: input.doctype as string };
+        const patchedDoc = withRoundedTotalFallback(docWithDoctype);
+        const result = await ctx.client.callMethod("frappe.client.submit", {
+          doc: patchedDoc,
+        });
+        ctx.client.invalidate(input.doctype as string, input.name as string);
+
+        const warnings = roundedTotalFallbackWarning(
+          docWithDoctype,
+          patchedDoc,
+        );
+
+        return {
+          data: result,
+          message: `${input.doctype} ${input.name} submitted successfully`,
+          doctype: input.doctype,
+          name: input.name,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
       });
-      ctx.client.invalidate(input.doctype as string, input.name as string);
-
-      const warnings = roundedTotalFallbackWarning(docWithDoctype, patchedDoc);
-
-      return {
-        data: result,
-        message: `${input.doctype} ${input.name} submitted successfully`,
-        doctype: input.doctype,
-        name: input.name,
-        ...(warnings.length > 0 ? { warnings } : {}),
-      };
     },
   },
 
@@ -390,6 +598,7 @@ export const operationsTools: ErpNextTool[] = [
   {
     name: "erpnext_doc_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get any ERPNext document by DocType and name. Useful for DocTypes not covered " +
       "by dedicated tools. Returns the full document with all fields.",
@@ -409,18 +618,19 @@ export const operationsTools: ErpNextTool[] = [
       required: ["doctype", "name"],
     },
     handler: async (input, ctx) => {
-      if (!input.doctype) {
+      if (typeof input.doctype !== "string" || !input.doctype.trim()) {
         throw new Error("[erpnext_doc_get] 'doctype' is required");
       }
-      if (!input.name) {
+      if (typeof input.name !== "string" || !input.name.trim()) {
         throw new Error("[erpnext_doc_get] 'name' is required");
       }
 
+      const doctype = input.doctype.trim();
       const doc = await ctx.client.get(
-        input.doctype as string,
-        input.name as string,
+        doctype,
+        input.name.trim(),
       );
-      return { data: doc };
+      return { data: { ...doc, doctype } };
     },
   },
 
@@ -432,7 +642,8 @@ export const operationsTools: ErpNextTool[] = [
     _meta: DOCLIST_META,
     description:
       "List any ERPNext documents by DocType. Useful for DocTypes not covered " +
-      "by dedicated tools. Supports field selection, filters (as JSON array), and limit.",
+      "by dedicated tools. Supports field selection, filters (as JSON array), " +
+      "bounded pagination, and an optional fresh read.",
     category: "operations",
     inputSchema: {
       type: "object",
@@ -451,14 +662,74 @@ export const operationsTools: ErpNextTool[] = [
         filters: {
           type: "array",
           description:
-            "Frappe filters as array of [fieldname, operator, value] tuples. " +
+            "Frappe filters as array of [fieldname, operator, value] tuples, or " +
+            "[child doctype, fieldname, operator, value] to filter on a child table. " +
+            "Values may be strings, numbers, booleans, null, or string/number arrays for in/not in. " +
             'Example: [["status","=","Open"],["company","=","Acme"]]',
           items: {
             type: "array",
-            items: { type: "string" },
+            anyOf: [
+              {
+                prefixItems: [
+                  { type: "string", minLength: 1 },
+                  { type: "string", minLength: 1 },
+                  {
+                    oneOf: [
+                      { type: ["string", "number", "boolean", "null"] },
+                      {
+                        type: "array",
+                        items: { type: ["string", "number"] },
+                      },
+                    ],
+                  },
+                ],
+                minItems: 3,
+                maxItems: 3,
+              },
+              {
+                prefixItems: [
+                  { type: "string", minLength: 1 },
+                  { type: "string", minLength: 1 },
+                  { type: "string", minLength: 1 },
+                  {
+                    oneOf: [
+                      { type: ["string", "number", "boolean", "null"] },
+                      {
+                        type: "array",
+                        items: { type: ["string", "number"] },
+                      },
+                    ],
+                  },
+                ],
+                minItems: 4,
+                maxItems: 4,
+              },
+              {
+                // 3.0.x advertised arbitrary string arrays. Keep accepting
+                // that legacy surface while describing real 3/4-part Frappe
+                // tuples precisely for modern clients.
+                items: { type: "string" },
+              },
+            ],
           },
         },
-        limit: { type: "number", description: "Max results (default 20)" },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: DOC_LIST_MAX_LIMIT,
+          description: "Max results (default 20, maximum 5000)",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          maximum: DOC_LIST_MAX_OFFSET,
+          description: "Pagination offset (default 0, maximum 100000)",
+        },
+        skip_cache: {
+          type: "boolean",
+          description:
+            "Force a fresh ERPNext read instead of using the short-lived list cache",
+        },
         order_by: {
           type: "string",
           description: "Order by clause (e.g. 'modified desc', 'name asc')",
@@ -470,18 +741,48 @@ export const operationsTools: ErpNextTool[] = [
       if (!input.doctype) {
         throw new Error("[erpnext_doc_list] 'doctype' is required");
       }
+      if (
+        input.limit !== undefined &&
+        (typeof input.limit !== "number" || !Number.isInteger(input.limit) ||
+          input.limit < 1 || input.limit > DOC_LIST_MAX_LIMIT)
+      ) {
+        throw new Error(
+          `[erpnext_doc_list] 'limit' must be an integer between 1 and ${DOC_LIST_MAX_LIMIT}`,
+        );
+      }
+      if (
+        input.offset !== undefined &&
+        (typeof input.offset !== "number" ||
+          !Number.isInteger(input.offset) || input.offset < 0 ||
+          input.offset > DOC_LIST_MAX_OFFSET)
+      ) {
+        throw new Error(
+          `[erpnext_doc_list] 'offset' must be an integer between 0 and ${DOC_LIST_MAX_OFFSET}`,
+        );
+      }
+      if (
+        input.skip_cache !== undefined && typeof input.skip_cache !== "boolean"
+      ) {
+        throw new Error("[erpnext_doc_list] 'skip_cache' must be a boolean");
+      }
 
       const limit = (input.limit as number) ?? 20;
       const fields = (input.fields as string[]) ?? ["name", "modified"];
       const filters = (input.filters as FrappeFilter[]) ?? [];
       const order_by = (input.order_by as string) ?? "modified desc";
-
-      const docs = await ctx.client.list(input.doctype as string, {
+      const offset = input.offset as number | undefined;
+      const listOptions = {
         fields,
         filters,
         limit,
+        ...(offset !== undefined ? { limit_start: offset } : {}),
         order_by,
-      });
+      };
+      const docs = input.skip_cache === true
+        ? await ctx.client.list(input.doctype as string, listOptions, {
+          skipCache: true,
+        })
+        : await ctx.client.list(input.doctype as string, listOptions);
 
       return {
         doctype: input.doctype as string,
@@ -624,6 +925,121 @@ export const operationsTools: ErpNextTool[] = [
         message: `${assignee} unassigned from ${doctype} ${name}`,
         assignment: unassignment,
       };
+    },
+  },
+
+  // ── Method Escape Hatch ────────────────────────────────────────────────────
+
+  {
+    name: "erpnext_method_call",
+    description:
+      "Call a whitelisted Frappe method directly (POST or GET /api/method/{method}). " +
+      "Escape hatch for behaviour that is not a plain document write: custom-app " +
+      "@frappe.whitelist methods, validate hooks that reject direct field updates, " +
+      "and GET-only endpoints. Deny-by-default: the method must match an entry in " +
+      "ERPNEXT_METHOD_ALLOWLIST (exact dotted path or 'prefix.*' wildcard), or the " +
+      "call is rejected before it reaches ERPNext. Set ERPNEXT_METHOD_ALLOWLIST=* " +
+      "to allow any method for a fully open session.",
+    category: "operations",
+    inputSchema: {
+      type: "object",
+      properties: {
+        method: {
+          type: "string",
+          description:
+            "Dotted path to the whitelisted method, e.g. 'frappe.client.get_count' " +
+            "or 'my_app.api.reconcile'.",
+          minLength: 1,
+        },
+        args: {
+          type: "object",
+          description: "Keyword arguments passed to the method.",
+        },
+        http_method: {
+          type: "string",
+          enum: ["GET", "POST"],
+          description:
+            "HTTP verb to use. Defaults to POST. Use GET for methods declared " +
+            '@frappe.whitelist(methods=["GET"]), which reject POST.',
+        },
+        invalidate: {
+          type: "object",
+          description:
+            "Optional { doctype, name } to drop from the read cache after a " +
+            "mutating call, so the next read reflects the method's side effects.",
+          properties: {
+            doctype: { type: "string", minLength: 1 },
+            name: { type: "string", minLength: 1 },
+          },
+          required: ["doctype", "name"],
+        },
+      },
+      required: ["method"],
+    },
+    handler: async (input, ctx) => {
+      if (typeof input.method !== "string" || !input.method.trim()) {
+        throw new Error(
+          "[erpnext_method_call] 'method' must be a non-empty dotted path",
+        );
+      }
+      const method = input.method.trim();
+      if (!isValidMethodPath(method)) {
+        throw new Error(
+          `[erpnext_method_call] 'method' is not a valid dotted path: '${method}'`,
+        );
+      }
+
+      const allowlist = loadMethodAllowlist();
+      if (!isMethodAllowed(method, allowlist)) {
+        throw new Error(
+          `[erpnext_method_call] '${method}' is not permitted. Add it (or a ` +
+            "'prefix.*' covering it) to ERPNEXT_METHOD_ALLOWLIST, or set " +
+            "ERPNEXT_METHOD_ALLOWLIST=* to allow any method.",
+        );
+      }
+
+      if (
+        input.args !== undefined &&
+        (typeof input.args !== "object" || input.args === null ||
+          Array.isArray(input.args))
+      ) {
+        throw new Error(
+          "[erpnext_method_call] 'args' must be an object of keyword arguments",
+        );
+      }
+      const args = (input.args as Record<string, unknown> | undefined) ?? {};
+
+      let httpMethod: "GET" | "POST" = "POST";
+      if (input.http_method !== undefined) {
+        if (input.http_method !== "GET" && input.http_method !== "POST") {
+          throw new Error(
+            "[erpnext_method_call] 'http_method' must be 'GET' or 'POST'",
+          );
+        }
+        httpMethod = input.http_method;
+      }
+
+      let invalidate: { doctype: string; name: string } | undefined;
+      if (input.invalidate !== undefined) {
+        const inv = input.invalidate as Record<string, unknown>;
+        if (
+          typeof inv?.doctype !== "string" || !inv.doctype.trim() ||
+          typeof inv?.name !== "string" || !inv.name.trim()
+        ) {
+          throw new Error(
+            "[erpnext_method_call] 'invalidate' requires non-empty 'doctype' and 'name'",
+          );
+        }
+        invalidate = { doctype: inv.doctype.trim(), name: inv.name.trim() };
+      }
+
+      const result = await ctx.client.callMethod(method, args, httpMethod);
+
+      if (invalidate) {
+        ctx.client.invalidate(invalidate.doctype, invalidate.name);
+      }
+
+      return { data: result };
     },
   },
 ];

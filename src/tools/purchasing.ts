@@ -9,8 +9,8 @@
 
 import type { FrappeFilter } from "../api/types.ts";
 import type { ErpNextTool } from "./types.ts";
-import { DOCLIST_META } from "./viewer-meta.ts";
-import { resolveSupplier } from "../api/resolve.ts";
+import { DOC_META, DOCLIST_META } from "./viewer-meta.ts";
+import { resolveLink, resolveSupplier } from "../api/resolve.ts";
 
 export const purchasingTools: ErpNextTool[] = [
   // ── Suppliers ─────────────────────────────────────────────────────────────
@@ -80,6 +80,7 @@ export const purchasingTools: ErpNextTool[] = [
   {
     name: "erpnext_supplier_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single ERPNext supplier by name (ID). Returns all fields including contact details.",
     category: "purchasing",
@@ -95,7 +96,7 @@ export const purchasingTools: ErpNextTool[] = [
         throw new Error("[erpnext_supplier_get] 'name' is required");
       }
       const doc = await ctx.client.get("Supplier", input.name as string);
-      return { data: doc };
+      return { data: { ...doc, doctype: "Supplier" } };
     },
   },
 
@@ -197,7 +198,9 @@ export const purchasingTools: ErpNextTool[] = [
         filters.push([
           "supplier",
           "=",
-          await resolveSupplier(ctx.client, input.supplier as string),
+          await resolveSupplier(ctx.client, input.supplier as string, {
+            inputPath: "supplier",
+          }),
         ]);
       }
       if (input.status) {
@@ -237,6 +240,7 @@ export const purchasingTools: ErpNextTool[] = [
   {
     name: "erpnext_purchase_order_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single Purchase Order by name (e.g. PO-00001). Returns full document with line items.",
     category: "purchasing",
@@ -255,7 +259,7 @@ export const purchasingTools: ErpNextTool[] = [
         throw new Error("[erpnext_purchase_order_get] 'name' is required");
       }
       const doc = await ctx.client.get("Purchase Order", input.name as string);
-      return { data: doc };
+      return { data: { ...doc, doctype: "Purchase Order" } };
     },
   },
 
@@ -268,7 +272,11 @@ export const purchasingTools: ErpNextTool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        supplier: { type: "string", description: "Supplier name (ID)" },
+        supplier: {
+          type: "string",
+          description:
+            "Supplier name or ID — a unique name resolves automatically",
+        },
         items: {
           type: "array",
           description: "Line items: [{item_code, qty, rate}]",
@@ -322,7 +330,15 @@ export const purchasingTools: ErpNextTool[] = [
           );
 
       const doc = await ctx.client.create("Purchase Order", {
-        supplier: input.supplier as string,
+        supplier: await resolveLink(
+          ctx.client,
+          "Supplier",
+          input.supplier as string,
+          "supplier_name",
+          // Write path: a fuzzy match here would attach the order to the wrong
+          // supplier, silently and irreversibly once submitted.
+          { allowPartialMatch: false, inputPath: "supplier" },
+        ),
         items,
         schedule_date: (input.schedule_date as string) ?? undefined,
       });
@@ -372,7 +388,9 @@ export const purchasingTools: ErpNextTool[] = [
         filters.push([
           "supplier",
           "=",
-          await resolveSupplier(ctx.client, input.supplier as string),
+          await resolveSupplier(ctx.client, input.supplier as string, {
+            inputPath: "supplier",
+          }),
         ]);
       }
       if (input.status) {
@@ -412,6 +430,7 @@ export const purchasingTools: ErpNextTool[] = [
   {
     name: "erpnext_purchase_invoice_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single Purchase Invoice by name (e.g. PINV-00001). Returns full document with line items.",
     category: "purchasing",
@@ -433,7 +452,7 @@ export const purchasingTools: ErpNextTool[] = [
         "Purchase Invoice",
         input.name as string,
       );
-      return { data: doc };
+      return { data: { ...doc, doctype: "Purchase Invoice" } };
     },
   },
 
@@ -475,7 +494,9 @@ export const purchasingTools: ErpNextTool[] = [
         filters.push([
           "supplier",
           "=",
-          await resolveSupplier(ctx.client, input.supplier as string),
+          await resolveSupplier(ctx.client, input.supplier as string, {
+            inputPath: "supplier",
+          }),
         ]);
       }
       if (input.status) {
@@ -514,6 +535,7 @@ export const purchasingTools: ErpNextTool[] = [
   {
     name: "erpnext_purchase_receipt_get",
     annotations: { readOnlyHint: true },
+    _meta: DOC_META,
     description:
       "Get a single Purchase Receipt by name (e.g. MAT-PRE-00001). Returns full document with received items.",
     category: "purchasing",
@@ -535,7 +557,7 @@ export const purchasingTools: ErpNextTool[] = [
         "Purchase Receipt",
         input.name as string,
       );
-      return { data: doc };
+      return { data: { ...doc, doctype: "Purchase Receipt" } };
     },
   },
 
@@ -577,7 +599,9 @@ export const purchasingTools: ErpNextTool[] = [
         filters.push([
           "supplier",
           "=",
-          await resolveSupplier(ctx.client, input.supplier as string),
+          await resolveSupplier(ctx.client, input.supplier as string, {
+            inputPath: "supplier",
+          }),
         ]);
       }
       if (input.status) {
