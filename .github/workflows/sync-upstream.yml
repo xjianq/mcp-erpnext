@@ -1,26 +1,18 @@
 name: Auto Sync Upstream Fork
 on:
+  workflow_dispatch: # 手动触发
   schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    - cron: '0 6 * * *' # 每天早上6点自动同步
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current repo code
-        uses: actions/checkout@v4
+      - name: Sync from upstream
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
-          fetch-depth: 0
-
-      - name: Sync upstream punkpeye/awesome-mcp-servers
-        uses: repo-sync/github-sync@v2
-        with:
-          source_repo: "punkpeye/awesome-mcp-servers"
-          source_branch: "main"
-          destination_branch: "main"
+          upstream_repository: punkpeye/awesome-mcp-servers
+          target_repository: xjianq/mcp-erpnext
+          upstream_branch: main
+          target_branch: main
           github_token: ${{ secrets.PAT }}
-          sync_tags: true
